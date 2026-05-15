@@ -7,7 +7,7 @@
 
 use std::net::{TcpStream, ToSocketAddrs};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
 use crate::cocoon::{self, RunQueryOptions, WorkerInstanceV2, WorkerTypeV2};
@@ -210,7 +210,7 @@ fn authorize(session: &mut Session<ratls::RatlsStream>, config: &RuntimeConfig) 
     match connected_to_proxy.auth {
         cocoon::ProxyAuth::Short { secret_hash, .. } => {
             let Some(secret) = config.client_secret.as_deref() else {
-                bail!("short auth requires client.secret in TOML or COCOON_CLIENT_SECRET");
+                anyhow::bail!("short auth requires client.secret in TOML or COCOON_CLIENT_SECRET");
             };
             verify_secret_hash(secret, secret_hash)?;
 
@@ -222,7 +222,7 @@ fn authorize(session: &mut Session<ratls::RatlsStream>, config: &RuntimeConfig) 
             print_authorization_result(auth)?;
         }
         cocoon::ProxyAuth::Long { nonce } => {
-            bail!(
+            anyhow::bail!(
                 "auth: long nonce={nonce}; on-chain register is required before Rust can serve requests"
             );
         }
@@ -235,10 +235,9 @@ fn authorize(session: &mut Session<ratls::RatlsStream>, config: &RuntimeConfig) 
 fn verify_secret_hash(secret: &str, expected: &[u8; 32]) -> Result<()> {
     let digest = Sha256::digest(secret.as_bytes());
     if digest.as_slice() == expected {
-        Ok(())
-    } else {
-        Err(anyhow!("client secret hash does not match proxy challenge"))
+        return Ok(());
     }
+    anyhow::bail!("client secret hash does not match proxy challenge")
 }
 
 /// Converts the proxy authorization result into either a concise log or error.
@@ -256,7 +255,7 @@ fn print_authorization_result(auth: cocoon::AuthorizationWithProxy<'_>) -> Resul
             Ok(())
         }
         cocoon::AuthorizationWithProxy::Failed { error_code, error } => {
-            bail!("auth failed: code={} error={}", error_code, utf8(error)?)
+            anyhow::bail!("auth failed: code={} error={}", error_code, utf8(error)?)
         }
     }
 }

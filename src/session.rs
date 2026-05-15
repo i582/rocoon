@@ -7,7 +7,7 @@
 
 use std::io::{Read, Write};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use rand::Rng;
 use rand::RngCore;
 use tl_proto::{TlRead, TlWrite};
@@ -119,10 +119,10 @@ impl<RW: Read + Write> Session<RW> {
             .context("decode tcp.connected")?;
 
         if connected.id != id {
-            return Err(anyhow!(
+            anyhow::bail!(
                 "tcp.connected id mismatch: got {}, expected {id}",
                 connected.id
-            ));
+            );
         }
 
         Ok((session, TcpConnected { id }))
@@ -151,7 +151,7 @@ impl<RW: Read + Write> Session<RW> {
                 TcpPacket::QueryAnswer { id, data } if id == query_id => return Ok(data.to_vec()),
                 TcpPacket::QueryError { id, code, message } if id == query_id => {
                     let message = std::str::from_utf8(message).unwrap_or("<non-utf8>");
-                    return Err(anyhow!("tcp.queryError code={code}: {message}"));
+                    anyhow::bail!("tcp.queryError code={code}: {message}");
                 }
                 TcpPacket::Ping { id } => {
                     let pong = tl_proto::serialize(TcpPong { id });
@@ -205,7 +205,7 @@ impl<RW: Read + Write> Session<RW> {
                             ..
                         } if got_id == &request_id => {
                             if response_head.is_some() {
-                                return Err(anyhow!("duplicate client.queryAnswerEx"));
+                                anyhow::bail!("duplicate client.queryAnswerEx");
                             }
                             response_head = Some(answer.to_vec());
                             if final_info.is_some() {
@@ -222,9 +222,9 @@ impl<RW: Read + Write> Session<RW> {
                             ..
                         } if got_id == &request_id => {
                             if response_head.is_none() {
-                                return Err(anyhow!(
+                                anyhow::bail!(
                                     "received client.queryAnswerPartEx before response head"
-                                ));
+                                );
                             }
                             payload_parts.push(answer.to_vec());
                             if final_info.is_some() {
@@ -241,9 +241,7 @@ impl<RW: Read + Write> Session<RW> {
                             ..
                         } if got_id == &request_id => {
                             let error = std::str::from_utf8(error).unwrap_or("<non-utf8>");
-                            return Err(anyhow!(
-                                "client.queryAnswerErrorEx code={error_code}: {error}"
-                            ));
+                            anyhow::bail!("client.queryAnswerErrorEx code={error_code}: {error}");
                         }
                         _ => {}
                     }
@@ -285,10 +283,10 @@ impl<RW: Read + Write> Session<RW> {
         let seqno = u32::from_le_bytes(header[4..8].try_into().unwrap());
 
         if seqno != self.recv_seqno {
-            return Err(anyhow!(
+            anyhow::bail!(
                 "unexpected frame seqno {seqno}, expected {}",
                 self.recv_seqno
-            ));
+            );
         }
         self.recv_seqno = self
             .recv_seqno
@@ -296,7 +294,7 @@ impl<RW: Read + Write> Session<RW> {
             .context("recv seqno overflow")?;
 
         if size > MAX_FRAME_SIZE {
-            return Err(anyhow!("frame too large: {size} bytes"));
+            anyhow::bail!("frame too large: {size} bytes");
         }
 
         let mut payload = vec![0u8; size as usize];

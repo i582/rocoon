@@ -8,7 +8,7 @@
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
 const POW_SIMPLE_MAGIC: u32 = 0x418e_1291;
@@ -54,9 +54,7 @@ fn read_challenge<R: Read>(reader: &mut R) -> Result<Challenge> {
 
     let magic = u32::from_le_bytes(buf[0..4].try_into().unwrap());
     if magic != POW_SIMPLE_MAGIC {
-        return Err(anyhow!(
-            "unexpected PoW magic 0x{magic:08x}, expected 0x{POW_SIMPLE_MAGIC:08x}"
-        ));
+        anyhow::bail!("unexpected PoW magic 0x{magic:08x}, expected 0x{POW_SIMPLE_MAGIC:08x}");
     }
 
     let difficulty = u32::from_le_bytes(buf[4..8].try_into().unwrap()) as i32;

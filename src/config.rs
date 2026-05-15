@@ -12,7 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
 const DEFAULT_CONFIG_PATH: &str = "rocoon.toml";
@@ -220,12 +220,12 @@ where
                 .next()
                 .ok_or_else(|| anyhow!("missing path after {first}"))?;
             if let Some(extra) = args.next() {
-                bail!("unexpected extra argument: {}", extra.to_string_lossy());
+                anyhow::bail!("unexpected extra argument: {}", extra.to_string_lossy());
             }
             Ok((PathBuf::from(path), true))
         }
-        "--help" | "-h" => bail!("usage: rocoon [--config path]"),
-        _ => bail!("unknown argument: {first}; use --config path"),
+        "--help" | "-h" => anyhow::bail!("usage: rocoon [--config path]"),
+        _ => anyhow::bail!("unknown argument: {first}; use --config path"),
     }
 }
 
@@ -246,25 +246,25 @@ fn read_config(path: &Path, explicit: bool) -> Result<FileConfig> {
 /// non-positive timeouts, or negative request limits.
 fn validate(config: &FileConfig) -> Result<()> {
     if config.network.proxy_addr.trim().is_empty() {
-        bail!("network.proxy_addr must not be empty");
+        anyhow::bail!("network.proxy_addr must not be empty");
     }
     if config.network.connect_timeout_secs == 0 {
-        bail!("network.connect_timeout_secs must be greater than zero");
+        anyhow::bail!("network.connect_timeout_secs must be greater than zero");
     }
     if config.server.listen_addr.trim().is_empty() {
-        bail!("server.listen_addr must not be empty");
+        anyhow::bail!("server.listen_addr must not be empty");
     }
     if config.client.owner_address.trim().is_empty() {
-        bail!("client.owner_address must not be empty");
+        anyhow::bail!("client.owner_address must not be empty");
     }
     if config.request.max_coefficient < 0 {
-        bail!("request.max_coefficient must not be negative");
+        anyhow::bail!("request.max_coefficient must not be negative");
     }
     if config.request.max_tokens < 0 {
-        bail!("request.max_tokens must not be negative");
+        anyhow::bail!("request.max_tokens must not be negative");
     }
     if config.request.timeout_secs <= 0.0 {
-        bail!("request.timeout_secs must be greater than zero");
+        anyhow::bail!("request.timeout_secs must be greater than zero");
     }
     Ok(())
 }

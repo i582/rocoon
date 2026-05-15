@@ -11,7 +11,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 use crate::client::{CocoonClient, HttpExchange};
@@ -197,7 +197,7 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
     let mut data = Vec::new();
     let header_end = loop {
         if data.len() > MAX_HEADER_BYTES {
-            bail!("HTTP headers too large");
+            anyhow::bail!("HTTP headers too large");
         }
 
         if let Some(pos) = find_header_end(&data) {
@@ -207,7 +207,7 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
         let mut buf = [0u8; 4096];
         let n = stream.read(&mut buf).context("read HTTP request")?;
         if n == 0 {
-            bail!("connection closed before HTTP headers");
+            anyhow::bail!("connection closed before HTTP headers");
         }
         data.extend_from_slice(&buf[..n]);
     };
@@ -242,7 +242,7 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
         .context("parse Content-Length")?
         .unwrap_or(0);
     if content_length > MAX_BODY_BYTES {
-        bail!("HTTP body too large");
+        anyhow::bail!("HTTP body too large");
     }
 
     let body_start = header_end + 4;
@@ -251,7 +251,7 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
         let mut buf = [0u8; 8192];
         let n = stream.read(&mut buf).context("read HTTP body")?;
         if n == 0 {
-            bail!("connection closed before HTTP body");
+            anyhow::bail!("connection closed before HTTP body");
         }
         body.extend_from_slice(&buf[..n]);
     }
@@ -297,13 +297,13 @@ fn parse_completion_request(body: &[u8], defaults: Defaults) -> Result<Completio
         .and_then(|value| value.as_f64())
         .unwrap_or(defaults.timeout);
     if max_tokens < 0 {
-        bail!("max_tokens must not be negative");
+        anyhow::bail!("max_tokens must not be negative");
     }
     if max_coefficient < 0 {
-        bail!("max_coefficient must not be negative");
+        anyhow::bail!("max_coefficient must not be negative");
     }
     if timeout <= 0.0 {
-        bail!("timeout must be greater than zero");
+        anyhow::bail!("timeout must be greater than zero");
     }
 
     if max_tokens > 0 {
