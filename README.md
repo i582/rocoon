@@ -94,7 +94,7 @@ contract address in `client.connectToProxy`.
 `/stats.client_contract.*`, and the masterchain seqno used for the read. The
 same liteclient path sends signed external messages for explicit control
 endpoints. It does not top up or register contracts. Omit `config_path` to use
-the built-in mainnet/testnet config from `ton-rs`.
+rocoon's embedded mainnet config, or the `ton-rs` default when `mainnet = false`.
 
 Use a different config file:
 

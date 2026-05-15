@@ -45,6 +45,8 @@ pub const COCOON_WALLET_MIN_BALANCE_NANOTONS: u64 = 2_100_000_000;
 const LEGACY_MIN_STAKE_NANOTONS: u64 = 1_000_000_000;
 const WALLET_FORWARD_MODE: u8 = 0;
 const WALLET_EXTERNAL_VALIDITY_SECS: u64 = 3_600;
+const EMBEDDED_MAINNET_FULL_TON_CONFIG: &str =
+    include_str!("../../../spec/mainnet-full-ton-config.json");
 
 /// Synchronous wrapper around `ton-rs` async liteclient.
 pub struct TonReadonlyClient {
@@ -425,6 +427,10 @@ impl TonReadonlyClient {
             builder = builder
                 .with_net_config_path(path_to_str(path)?)
                 .with_context(|| format!("load TON config {}", path.display()))?;
+        } else if config.mainnet {
+            builder = builder
+                .with_net_config_json(EMBEDDED_MAINNET_FULL_TON_CONFIG)
+                .context("load embedded mainnet TON config")?;
         }
         let client = builder.build().context("build TON liteclient")?;
         Ok(Self {
@@ -1677,17 +1683,26 @@ mod tests {
         ACTIVE_CLIENT_REGISTER_VALUE_NANOTONS, CLIENT_TOP_UP_EXTRA_NANOTONS,
         COCOON_WALLET_MIN_BALANCE_NANOTONS, COCOON_WALLET_RESERVE_NANOTONS,
         CONTROL_MESSAGE_VALUE_NANOTONS, ClientContractSnapshot, ClientRegisterContext,
-        CocoonRootConfig, EXT_CLIENT_TOP_UP, OWNER_CLIENT_REGISTER, TonAccountState,
-        TonControlAction, TonWalletSnapshot, build_client_control_body, build_client_register_body,
-        build_client_top_up_body, build_wallet_external_message, client_register_attached_value,
-        client_top_up_amount, read_cocoon_wallet_seqno, validate_cocoon_wallet_can_send_value,
+        CocoonRootConfig, EMBEDDED_MAINNET_FULL_TON_CONFIG, EXT_CLIENT_TOP_UP,
+        OWNER_CLIENT_REGISTER, TonAccountState, TonControlAction, TonWalletSnapshot,
+        build_client_control_body, build_client_register_body, build_client_top_up_body,
+        build_wallet_external_message, client_register_attached_value, client_top_up_amount,
+        read_cocoon_wallet_seqno, validate_cocoon_wallet_can_send_value,
     };
     use rocoon_contract::OWNER_CLIENT_WITHDRAW;
     use std::str::FromStr;
     use ton::block_tlb::{MaybeAccount, Msg};
+    use ton::lite_client::LiteClient;
     use ton::ton_core::cell::TonCell;
     use ton::ton_core::traits::tlb::TLB;
     use ton::ton_core::types::TonAddress;
+
+    #[test]
+    fn embedded_mainnet_config_is_valid_for_lite_client_builder() -> anyhow::Result<()> {
+        LiteClient::builder()?.with_net_config_json(EMBEDDED_MAINNET_FULL_TON_CONFIG)?;
+
+        Ok(())
+    }
 
     #[test]
     fn cocoon_wallet_seqno_is_first_u32_in_data_cell() -> anyhow::Result<()> {

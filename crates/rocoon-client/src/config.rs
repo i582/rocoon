@@ -70,9 +70,9 @@ pub struct NodeWalletKey([u8; 32]);
 pub struct TonRuntimeConfig {
     /// Whether `rocoon` should read wallet/root state from TON liteservers.
     pub readonly_enabled: bool,
-    /// Selects mainnet built-in liteserver config when no explicit config is set.
+    /// Selects mainnet, using rocoon's embedded mainnet config when no explicit config is set.
     pub mainnet: bool,
-    /// Optional TON global config JSON path.
+    /// Optional TON global config JSON path overriding the embedded/default config.
     pub config_path: Option<PathBuf>,
     /// Optional root contract address shown in diagnostics and used by future root polling.
     pub root_contract_address: Option<String>,
