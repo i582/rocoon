@@ -5,7 +5,7 @@ use rand::Rng;
 use rand::RngCore;
 use tl_proto::{TlRead, TlWrite};
 
-use crate::cocoon::{self, OwnedFinalInfo, RunQueryOptions};
+use crate::cocoon::{self, RunQueryOptions};
 
 const MAX_FRAME_SIZE: u32 = 1 << 20;
 
@@ -73,7 +73,6 @@ pub struct TcpConnected {
 pub struct RunQueryOutput {
     pub response_head: Vec<u8>,
     pub payload_parts: Vec<Vec<u8>>,
-    pub final_info: Option<OwnedFinalInfo>,
 }
 
 impl<RW: Read + Write> Session<RW> {
@@ -149,9 +148,6 @@ impl<RW: Read + Write> Session<RW> {
 
         let request =
             cocoon::encode_run_query_ex(model, http_request_payload, &request_id, options);
-        if std::env::var("ROCOON_DUMP_TL").is_ok() {
-            eprintln!("rocoon client.runQueryEx tl: {}", hex::encode(&request));
-        }
         let packet = tl_proto::serialize(TcpPacketOut { data: &request });
         self.send_frame(&packet)
             .context("send client.runQueryEx tcp.packet")?;
@@ -180,11 +176,10 @@ impl<RW: Read + Write> Session<RW> {
                                 return Err(anyhow!("duplicate client.queryAnswerEx"));
                             }
                             response_head = Some(answer.to_vec());
-                            if let Some(final_info) = final_info {
+                            if final_info.is_some() {
                                 return Ok(RunQueryOutput {
                                     response_head: response_head.unwrap(),
                                     payload_parts,
-                                    final_info: Some(final_info.to_owned()),
                                 });
                             }
                         }
@@ -200,11 +195,10 @@ impl<RW: Read + Write> Session<RW> {
                                 ));
                             }
                             payload_parts.push(answer.to_vec());
-                            if let Some(final_info) = final_info {
+                            if final_info.is_some() {
                                 return Ok(RunQueryOutput {
                                     response_head: response_head.unwrap(),
                                     payload_parts,
-                                    final_info: Some(final_info.to_owned()),
                                 });
                             }
                         }

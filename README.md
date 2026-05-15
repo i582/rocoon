@@ -14,7 +14,7 @@ Current scope:
 - Serve OpenAI-compatible HTTP on `127.0.0.1:9999`.
 - Implement `/v1/models` through `client.getWorkerTypesV2`.
 - Implement `/v1/chat/completions` and `/v1/completions` through `client.runQueryEx`.
-- Collect streamed Cocoon answer parts and expose `client.queryFinalInfo` token stats as `X-Cocoon-*` headers.
+- Collect streamed Cocoon answer parts before returning the local HTTP response.
 
 Not implemented yet:
 
@@ -48,7 +48,6 @@ min_config_version = 0
 max_coefficient = 4000
 max_tokens = 10000
 timeout_secs = 120.0
-enable_debug = false
 ```
 
 `client.owner_address` is the Cocoon wallet contract address used by the C++

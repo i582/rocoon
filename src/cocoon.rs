@@ -7,7 +7,6 @@ pub struct RunQueryOptions {
     pub max_tokens: i32,
     pub timeout: f64,
     pub min_config_version: i32,
-    pub enable_debug: bool,
     pub public_key: Option<[u8; 32]>,
 }
 
@@ -95,6 +94,7 @@ pub struct ProxyParams<'tl> {
 
 #[derive(Debug, TlRead)]
 #[tl(boxed)]
+#[allow(dead_code)]
 pub enum ProxyAuth<'tl> {
     #[tl(id = 0xd6ffc5af)]
     Short {
@@ -107,6 +107,7 @@ pub enum ProxyAuth<'tl> {
 
 #[derive(Debug, TlRead)]
 #[tl(boxed)]
+#[allow(dead_code)]
 pub enum SignedPayment<'tl> {
     #[tl(id = 0x02998182)]
     Data { data: &'tl [u8] },
@@ -116,6 +117,7 @@ pub enum SignedPayment<'tl> {
 
 #[derive(Debug, TlRead)]
 #[tl(boxed)]
+#[allow(dead_code)]
 pub enum AuthorizationWithProxy<'tl> {
     #[tl(id = 0x75d5ac34)]
     Success {
@@ -149,26 +151,6 @@ pub struct WorkerInstanceV2 {
     pub max_active_requests: i32,
 }
 
-#[derive(Debug, Clone)]
-pub struct OwnedFinalInfo {
-    pub tokens_used: TokensUsed,
-    pub worker_debug: Option<String>,
-    pub proxy_debug: Option<String>,
-    pub proxy_start_time: Option<f64>,
-    pub proxy_end_time: Option<f64>,
-    pub worker_start_time: Option<f64>,
-    pub worker_end_time: Option<f64>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct TokensUsed {
-    pub prompt_tokens_used: i64,
-    pub cached_tokens_used: i64,
-    pub completion_tokens_used: i64,
-    pub reasoning_tokens_used: i64,
-    pub total_tokens_used: i64,
-}
-
 #[derive(Debug, TlRead)]
 #[allow(dead_code)]
 pub struct QueryFinalInfo<'tl> {
@@ -190,6 +172,7 @@ pub struct QueryFinalInfo<'tl> {
 }
 
 #[derive(Debug, Clone, Copy, TlRead)]
+#[allow(dead_code)]
 pub struct TokensUsedTl {
     pub prompt_tokens_used: i64,
     pub cached_tokens_used: i64,
@@ -298,7 +281,7 @@ pub fn encode_run_query_ex(
         flags |= 2;
     }
     out.extend_from_slice(&flags.to_le_bytes());
-    write_tl_bool(&mut out, options.enable_debug);
+    write_tl_bool(&mut out, false);
     if let Some(public_key) = options.public_key {
         out.extend_from_slice(&public_key);
     }
@@ -324,36 +307,6 @@ pub fn decode_query_answer_ex(raw: &[u8]) -> Result<QueryAnswerEx<'_>> {
 
 pub fn decode_http_response(raw: &[u8]) -> Result<HttpResponse<'_>> {
     tl_proto::deserialize::<HttpResponse>(raw).context("decode http.response")
-}
-
-impl QueryFinalInfo<'_> {
-    pub fn to_owned(&self) -> OwnedFinalInfo {
-        OwnedFinalInfo {
-            tokens_used: self.tokens_used.into(),
-            worker_debug: self
-                .worker_debug
-                .map(|value| String::from_utf8_lossy(value).into_owned()),
-            proxy_debug: self
-                .proxy_debug
-                .map(|value| String::from_utf8_lossy(value).into_owned()),
-            proxy_start_time: self.proxy_start_time,
-            proxy_end_time: self.proxy_end_time,
-            worker_start_time: self.worker_start_time,
-            worker_end_time: self.worker_end_time,
-        }
-    }
-}
-
-impl From<TokensUsedTl> for TokensUsed {
-    fn from(value: TokensUsedTl) -> Self {
-        Self {
-            prompt_tokens_used: value.prompt_tokens_used,
-            cached_tokens_used: value.cached_tokens_used,
-            completion_tokens_used: value.completion_tokens_used,
-            reasoning_tokens_used: value.reasoning_tokens_used,
-            total_tokens_used: value.total_tokens_used,
-        }
-    }
 }
 
 fn write_tl_bytes(out: &mut Vec<u8>, bytes: &[u8]) {

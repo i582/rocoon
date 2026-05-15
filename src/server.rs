@@ -8,7 +8,6 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use crate::client::{CocoonClient, HttpExchange};
-use crate::cocoon::OwnedFinalInfo;
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
@@ -18,13 +17,11 @@ pub struct Defaults {
     pub max_coefficient: i32,
     pub max_tokens: i32,
     pub timeout: f64,
-    pub enable_debug: bool,
 }
 
 struct HttpRequest {
     method: String,
     path: String,
-    headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
 
@@ -34,7 +31,6 @@ struct CompletionRequest {
     max_coefficient: i32,
     max_tokens: i32,
     timeout: f64,
-    enable_debug: bool,
 }
 
 pub fn serve(listen_addr: &str, client: CocoonClient, defaults: Defaults) -> Result<()> {
@@ -119,12 +115,10 @@ fn handle_connection(
                 .run_chat_completion(
                     &completion.model,
                     path,
-                    &request.headers,
                     &completion.body,
                     completion.max_coefficient,
                     completion.max_tokens,
                     completion.timeout,
-                    completion.enable_debug,
                 )
                 .map_err(|error| HttpError::new(stream.try_clone().ok(), 502, error))?;
             write_cocoon_http_response(&mut stream, response)
@@ -234,12 +228,7 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
     }
     body.truncate(content_length);
 
-    Ok(HttpRequest {
-        method,
-        path,
-        headers,
-        body,
-    })
+    Ok(HttpRequest { method, path, body })
 }
 
 fn parse_completion_request(body: &[u8], defaults: Defaults) -> Result<CompletionRequest> {
@@ -273,11 +262,6 @@ fn parse_completion_request(body: &[u8], defaults: Defaults) -> Result<Completio
         .remove("timeout")
         .and_then(|value| value.as_f64())
         .unwrap_or(defaults.timeout);
-    let enable_debug = object
-        .remove("enable_debug")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(defaults.enable_debug);
-
     if max_tokens < 0 {
         bail!("max_tokens must not be negative");
     }
@@ -313,13 +297,11 @@ fn parse_completion_request(body: &[u8], defaults: Defaults) -> Result<Completio
         max_coefficient,
         max_tokens,
         timeout,
-        enable_debug,
     })
 }
 
 fn write_cocoon_http_response(stream: &mut TcpStream, response: HttpExchange) -> Result<()> {
-    let mut headers = sanitized_response_headers(response.headers);
-    add_final_info_headers(&mut headers, response.final_info.as_ref());
+    let headers = sanitized_response_headers(response.headers);
     write_response(
         stream,
         response.status_code,
@@ -381,58 +363,9 @@ fn sanitized_response_headers(headers: Vec<(String, String)>) -> Vec<(String, St
             !name.eq_ignore_ascii_case("content-length")
                 && !name.eq_ignore_ascii_case("connection")
                 && !name.eq_ignore_ascii_case("transfer-encoding")
+                && !name.to_ascii_lowercase().starts_with("x-cocoon-")
         })
         .collect()
-}
-
-fn add_final_info_headers(
-    headers: &mut Vec<(String, String)>,
-    final_info: Option<&OwnedFinalInfo>,
-) {
-    let Some(final_info) = final_info else {
-        return;
-    };
-
-    if let Some(debug) = &final_info.proxy_debug {
-        eprintln!("Cocoon proxy_debug: {debug}");
-    }
-    if let Some(debug) = &final_info.worker_debug {
-        eprintln!("Cocoon worker_debug: {debug}");
-    }
-
-    let tokens = final_info.tokens_used;
-    headers.push((
-        "X-Cocoon-Prompt-Tokens-Used".to_string(),
-        tokens.prompt_tokens_used.to_string(),
-    ));
-    headers.push((
-        "X-Cocoon-Cached-Tokens-Used".to_string(),
-        tokens.cached_tokens_used.to_string(),
-    ));
-    headers.push((
-        "X-Cocoon-Completion-Tokens-Used".to_string(),
-        tokens.completion_tokens_used.to_string(),
-    ));
-    headers.push((
-        "X-Cocoon-Reasoning-Tokens-Used".to_string(),
-        tokens.reasoning_tokens_used.to_string(),
-    ));
-    headers.push((
-        "X-Cocoon-Total-Tokens-Used".to_string(),
-        tokens.total_tokens_used.to_string(),
-    ));
-    if let Some(value) = final_info.proxy_start_time {
-        headers.push(("X-Cocoon-Proxy-Start-Time".to_string(), value.to_string()));
-    }
-    if let Some(value) = final_info.proxy_end_time {
-        headers.push(("X-Cocoon-Proxy-End-Time".to_string(), value.to_string()));
-    }
-    if let Some(value) = final_info.worker_start_time {
-        headers.push(("X-Cocoon-Worker-Start-Time".to_string(), value.to_string()));
-    }
-    if let Some(value) = final_info.worker_end_time {
-        headers.push(("X-Cocoon-Worker-End-Time".to_string(), value.to_string()));
-    }
 }
 
 fn find_header_end(data: &[u8]) -> Option<usize> {

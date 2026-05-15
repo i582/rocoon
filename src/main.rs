@@ -19,7 +19,6 @@ fn main() -> Result<()> {
         max_coefficient: config.max_coefficient,
         max_tokens: config.max_tokens,
         timeout: config.request_timeout,
-        enable_debug: config.enable_debug,
     };
     server::serve(&config.listen_addr, client, defaults)
 }

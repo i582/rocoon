@@ -24,7 +24,6 @@ pub struct RuntimeConfig {
     pub max_coefficient: i32,
     pub max_tokens: i32,
     pub request_timeout: f64,
-    pub enable_debug: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,7 +62,6 @@ struct RequestConfig {
     max_coefficient: i32,
     max_tokens: i32,
     timeout_secs: f64,
-    enable_debug: bool,
 }
 
 impl RuntimeConfig {
@@ -102,11 +100,6 @@ impl RuntimeConfig {
             config.request.timeout_secs =
                 value.parse().context("parse COCOON_REQUEST_TIMEOUT_SECS")?;
         }
-        if let Ok(value) = env::var("COCOON_ENABLE_DEBUG") {
-            config.request.enable_debug =
-                parse_bool_env(&value).context("parse COCOON_ENABLE_DEBUG")?;
-        }
-
         validate(&config)?;
 
         Ok(Self {
@@ -120,7 +113,6 @@ impl RuntimeConfig {
             max_coefficient: config.request.max_coefficient,
             max_tokens: config.request.max_tokens,
             request_timeout: config.request.timeout_secs,
-            enable_debug: config.request.enable_debug,
         })
     }
 }
@@ -169,7 +161,6 @@ impl Default for RequestConfig {
             max_coefficient: 4000,
             max_tokens: 10000,
             timeout_secs: 120.0,
-            enable_debug: false,
         }
     }
 }
@@ -234,12 +225,4 @@ fn validate(config: &FileConfig) -> Result<()> {
         bail!("request.timeout_secs must be greater than zero");
     }
     Ok(())
-}
-
-fn parse_bool_env(value: &str) -> Result<bool> {
-    match value {
-        "1" | "true" | "TRUE" | "yes" | "YES" => Ok(true),
-        "0" | "false" | "FALSE" | "no" | "NO" => Ok(false),
-        _ => bail!("expected boolean value"),
-    }
 }

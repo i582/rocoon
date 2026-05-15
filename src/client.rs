@@ -3,7 +3,7 @@ use std::net::{TcpStream, ToSocketAddrs};
 use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 
-use crate::cocoon::{self, OwnedFinalInfo, RunQueryOptions, WorkerInstanceV2, WorkerTypeV2};
+use crate::cocoon::{self, RunQueryOptions, WorkerInstanceV2, WorkerTypeV2};
 use crate::config::RuntimeConfig;
 use crate::pow;
 use crate::ratls;
@@ -32,7 +32,6 @@ pub struct HttpExchange {
     pub reason: String,
     pub headers: Vec<(String, String)>,
     pub payload: Vec<u8>,
-    pub final_info: Option<OwnedFinalInfo>,
 }
 
 impl CocoonClient {
@@ -76,7 +75,6 @@ impl CocoonClient {
                 max_tokens: config.max_tokens,
                 timeout: config.request_timeout * 0.95,
                 min_config_version: config.min_config_version,
-                enable_debug: config.enable_debug,
                 public_key: None,
             },
             proto_version,
@@ -105,25 +103,19 @@ impl CocoonClient {
         &mut self,
         model: &str,
         path: &str,
-        headers: &[(String, String)],
         body: &[u8],
         max_coefficient: i32,
         max_tokens: i32,
         timeout: f64,
-        enable_debug: bool,
     ) -> Result<HttpExchange> {
         let mut options = self.request_options;
         options.max_coefficient = max_coefficient;
         options.max_tokens = max_tokens;
         options.timeout = timeout * 0.95;
-        options.enable_debug = enable_debug;
         options.public_key = (self.proto_version >= 3).then_some([0u8; 32]);
 
         let http_request =
-            cocoon::encode_http_request("POST", path, forwarded_headers(headers, body.len()), body);
-        if std::env::var("ROCOON_DUMP_TL").is_ok() {
-            eprintln!("rocoon http.request tl: {}", hex::encode(&http_request));
-        }
+            cocoon::encode_http_request("POST", path, json_request_headers(body.len()), body);
         let output = match self
             .session
             .run_client_query_ex(model, &http_request, options)
@@ -147,62 +139,23 @@ impl CocoonClient {
     }
 }
 
-fn forwarded_headers(headers: &[(String, String)], body_len: usize) -> Vec<(&str, String)> {
-    let mut out: Vec<(&str, String)> = headers
-        .iter()
-        .filter(|(name, _)| {
-            !name.eq_ignore_ascii_case("content-length")
-                && !name.eq_ignore_ascii_case("connection")
-                && !name.eq_ignore_ascii_case("transfer-encoding")
-        })
-        .map(|(name, value)| (name.as_str(), value.clone()))
-        .collect();
-
-    if !out
-        .iter()
-        .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
-    {
-        out.push(("Content-Type", "application/json".to_string()));
-    }
-    out.push(("Content-Length", body_len.to_string()));
-    out
+fn json_request_headers(body_len: usize) -> Vec<(&'static str, String)> {
+    vec![
+        ("Content-Type", "application/json".to_string()),
+        ("Content-Length", body_len.to_string()),
+    ]
 }
 
 fn authorize(session: &mut Session<ratls::RatlsStream>, config: &RuntimeConfig) -> Result<i32> {
-    println!(
-        "calling client.connectToProxy: owner={} min_config_version={}",
-        config.owner_address, config.min_config_version
-    );
+    println!("authenticating as {}", config.owner_address);
     let request = cocoon::encode_connect_to_proxy(&config.owner_address, config.min_config_version);
     let response = session
         .make_request(&request)
         .context("client.connectToProxy")?;
     let connected_to_proxy = cocoon::decode_connected_to_proxy(&response)?;
 
-    println!(
-        "proxy owner: {}",
-        utf8(connected_to_proxy.params.proxy_owner_address)?
-    );
-    println!(
-        "proxy sc: {}",
-        utf8(connected_to_proxy.params.proxy_sc_address)?
-    );
-    println!(
-        "proxy pubkey: {}",
-        hex::encode(connected_to_proxy.params.proxy_public_key)
-    );
-    println!(
-        "proxy proto_version: {:?}, is_test: {:?}",
-        connected_to_proxy.params.proto_version, connected_to_proxy.params.is_test
-    );
-    println!("client sc: {}", utf8(connected_to_proxy.client_sc_address)?);
-
     match connected_to_proxy.auth {
-        cocoon::ProxyAuth::Short { secret_hash, nonce } => {
-            println!(
-                "auth: short nonce={nonce} secret_hash={}",
-                hex::encode(secret_hash)
-            );
+        cocoon::ProxyAuth::Short { secret_hash, .. } => {
             let Some(secret) = config.client_secret.as_deref() else {
                 bail!("short auth requires client.secret in TOML or COCOON_CLIENT_SECRET");
             };
@@ -228,21 +181,16 @@ fn authorize(session: &mut Session<ratls::RatlsStream>, config: &RuntimeConfig) 
 fn verify_secret_hash(secret: &str, expected: &[u8; 32]) -> Result<()> {
     let digest = Sha256::digest(secret.as_bytes());
     if digest.as_slice() == expected {
-        println!("client secret hash matches proxy challenge");
         Ok(())
     } else {
-        Err(anyhow!(
-            "client secret hash does not match proxy challenge: actual={} expected={}",
-            hex::encode(digest),
-            hex::encode(expected)
-        ))
+        Err(anyhow!("client secret hash does not match proxy challenge"))
     }
 }
 
 fn print_authorization_result(auth: cocoon::AuthorizationWithProxy<'_>) -> Result<()> {
     match auth {
         cocoon::AuthorizationWithProxy::Success {
-            signed_payment,
+            signed_payment: _,
             tokens_committed_to_db,
             max_tokens,
         } => {
@@ -250,14 +198,6 @@ fn print_authorization_result(auth: cocoon::AuthorizationWithProxy<'_>) -> Resul
                 "auth success: tokens_committed_to_db={} max_tokens={}",
                 tokens_committed_to_db, max_tokens
             );
-            match signed_payment {
-                cocoon::SignedPayment::Data { data } => {
-                    println!("auth signed payment: {} bytes", data.len());
-                }
-                cocoon::SignedPayment::Empty => {
-                    println!("auth signed payment: empty");
-                }
-            }
             Ok(())
         }
         cocoon::AuthorizationWithProxy::Failed { error_code, error } => {
@@ -287,7 +227,6 @@ fn http_exchange_from_output(output: RunQueryOutput) -> Result<HttpExchange> {
             })
             .collect::<Result<_>>()?,
         payload,
-        final_info: output.final_info,
     })
 }
 
