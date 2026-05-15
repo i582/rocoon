@@ -5,11 +5,29 @@
 //! for serialization/deserialization. `tl-proto` handles the objects here, with
 //! a custom raw-double writer for `client.runQueryEx` because Cocoon's C++ peer
 //! expects IEEE-754 bits rather than `tl-proto`'s normalized `f64` writer.
+//! Source of truth: `cocoon/tl/generate/scheme/cocoon_api.tl`.
 
 use anyhow::{Context, Result};
 use tl_proto::{TlRead, TlWrite};
 
 /// Request limits and protocol options for `client.runQueryEx`.
+///
+/// Source TL:
+///
+/// ```tl
+/// client.runQueryEx#f54cb74b
+///     model_name:string
+///     query:bytes
+///     max_coefficient:int
+///     max_tokens:int
+///     timeout:double
+///     request_id:int256
+///     min_config_version:int
+///     flags:#
+///     enable_debug:flags.0?Bool
+///     public_key:flags.1?int256
+///     = client.QueryAnswerEx;
+/// ```
 #[derive(Debug, Clone, Copy)]
 pub struct RunQueryOptions {
     /// Maximum worker price coefficient the client accepts.
@@ -28,6 +46,18 @@ pub struct RunQueryOptions {
 }
 
 /// Parameters embedded into `client.connectToProxy`.
+///
+/// Source TL:
+///
+/// ```tl
+/// client.params#40fdca64
+///     flags:#
+///     client_owner_address:string
+///     is_test:flags.0?Bool
+///     min_proto_version:flags.1?int
+///     max_proto_version:flags.1?int
+///     = client.Params;
+/// ```
 #[derive(Debug, TlWrite)]
 struct ClientParams<'a> {
     #[tl(flags)]
@@ -42,6 +72,15 @@ struct ClientParams<'a> {
 }
 
 /// TL request that starts Cocoon proxy authorization.
+///
+/// Source TL:
+///
+/// ```tl
+/// client.connectToProxy
+///     params:client.params
+///     min_config_version:int
+///     = client.ConnectedToProxy;
+/// ```
 #[derive(Debug, TlWrite)]
 #[tl(boxed, id = 0xff5fa0f4)]
 struct ClientConnectToProxy<'a> {
@@ -50,6 +89,14 @@ struct ClientConnectToProxy<'a> {
 }
 
 /// TL request for short authorization using a shared secret.
+///
+/// Source TL:
+///
+/// ```tl
+/// client.authorizeWithProxyShort
+///     data:bytes
+///     = client.AuthorizationWithProxy;
+/// ```
 #[derive(Debug, TlWrite)]
 #[tl(boxed, id = 0x6c276723)]
 struct ClientAuthorizeWithProxyShort<'a> {
@@ -57,11 +104,26 @@ struct ClientAuthorizeWithProxyShort<'a> {
 }
 
 /// TL request for model and worker discovery.
+///
+/// Source TL:
+///
+/// ```tl
+/// client.getWorkerTypesV2 = client.WorkerTypesV2;
+/// ```
 #[derive(Debug, TlWrite)]
 #[tl(boxed, id = 0xb2133d72)]
 struct ClientGetWorkerTypesV2;
 
 /// HTTP header encoded inside Cocoon's TL `http.request`/`http.response`.
+///
+/// Source TL:
+///
+/// ```tl
+/// http.header
+///     name:string
+///     value:string
+///     = http.Header;
+/// ```
 #[derive(Debug, TlWrite, TlRead)]
 pub struct HttpHeader<'tl> {
     /// Header name as raw bytes.
@@ -71,6 +133,18 @@ pub struct HttpHeader<'tl> {
 }
 
 /// TL representation of an HTTP request forwarded to a Cocoon worker.
+///
+/// Source TL:
+///
+/// ```tl
+/// http.request
+///     method:string
+///     url:string
+///     http_version:string
+///     headers:(vector http.header)
+///     payload:bytes
+///     = http.Response;
+/// ```
 #[derive(Debug, TlWrite)]
 #[tl(boxed, id = 0x47492de5)]
 struct HttpRequest<'a> {
@@ -82,6 +156,23 @@ struct HttpRequest<'a> {
 }
 
 /// TL request that runs an HTTP query on a Cocoon worker.
+///
+/// Source TL:
+///
+/// ```tl
+/// client.runQueryEx#f54cb74b
+///     model_name:string
+///     query:bytes
+///     max_coefficient:int
+///     max_tokens:int
+///     timeout:double
+///     request_id:int256
+///     min_config_version:int
+///     flags:#
+///     enable_debug:flags.0?Bool
+///     public_key:flags.1?int256
+///     = client.QueryAnswerEx;
+/// ```
 #[derive(Debug, TlWrite)]
 #[tl(boxed, id = 0xf54c_b74b)]
 struct ClientRunQueryEx<'a> {
@@ -102,6 +193,18 @@ struct ClientRunQueryEx<'a> {
 }
 
 /// TL representation of an HTTP response returned by a Cocoon worker.
+///
+/// Source TL:
+///
+/// ```tl
+/// http.response
+///     http_version:string
+///     status_code:int
+///     reason:string
+///     headers:(vector http.header)
+///     payload:bytes
+///     = http.Response;
+/// ```
 #[derive(Debug, TlRead)]
 #[tl(boxed, id = 0x1cd0c42b)]
 pub struct HttpResponse<'tl> {
@@ -121,6 +224,17 @@ pub struct HttpResponse<'tl> {
 ///
 /// This carries proxy parameters, the derived client contract address, and the
 /// authorization mode the client must use next.
+///
+/// Source TL:
+///
+/// ```tl
+/// client.connectedToProxy
+///     params:proxy.params
+///     client_sc_address:string
+///     auth:client.ProxyConnectionAuth
+///     signed_payment:proxy.SignedPayment
+///     = client.ConnectedToProxy;
+/// ```
 #[derive(Debug, TlRead)]
 #[tl(boxed, id = 0x95317ad1)]
 pub struct ConnectedToProxy<'tl> {
@@ -131,6 +245,19 @@ pub struct ConnectedToProxy<'tl> {
 }
 
 /// Proxy metadata returned during connection setup.
+///
+/// Source TL:
+///
+/// ```tl
+/// proxy.params#d5c5609f
+///     flags:#
+///     proxy_public_key:int256
+///     proxy_owner_address:string
+///     proxy_sc_address:string
+///     is_test:flags.0?Bool
+///     proto_version:flags.1?int
+///     = proxy.Params;
+/// ```
 #[derive(Debug, TlRead)]
 #[non_exhaustive]
 pub struct ProxyParams<'tl> {
@@ -147,6 +274,18 @@ pub struct ProxyParams<'tl> {
 }
 
 /// Authorization mode selected by the proxy.
+///
+/// Source TL:
+///
+/// ```tl
+/// client.proxyConnectionAuthShort
+///     secret_hash:int256
+///     nonce:long
+///     = client.ProxyConnectionAuth;
+/// client.proxyConnectionAuthLong
+///     nonce:long
+///     = client.ProxyConnectionAuth;
+/// ```
 #[derive(Debug, TlRead)]
 #[tl(boxed)]
 pub enum ProxyAuth<'tl> {
@@ -162,6 +301,16 @@ pub enum ProxyAuth<'tl> {
 }
 
 /// Optional signed payment data returned by authorization.
+///
+/// Source TL:
+///
+/// ```tl
+/// proxy.signedPayment
+///     data:bytes
+///     = proxy.SignedPayment;
+/// proxy.signedPaymentEmpty
+///     = proxy.SignedPayment;
+/// ```
 #[derive(Debug, TlRead)]
 #[tl(boxed)]
 pub enum SignedPayment<'tl> {
@@ -172,6 +321,20 @@ pub enum SignedPayment<'tl> {
 }
 
 /// Result of `client.authorizeWithProxyShort`.
+///
+/// Source TL:
+///
+/// ```tl
+/// client.authorizationWithProxySuccess
+///     signed_payment:proxy.SignedPayment
+///     tokens_committed_to_db:long
+///     max_tokens:long
+///     = client.AuthorizationWithProxy;
+/// client.authorizationWithProxyFailed
+///     error_code:int
+///     error:string
+///     = client.AuthorizationWithProxy;
+/// ```
 #[derive(Debug, TlRead)]
 #[tl(boxed)]
 pub enum AuthorizationWithProxy<'tl> {
@@ -188,6 +351,14 @@ pub enum AuthorizationWithProxy<'tl> {
 }
 
 /// Response object for `client.getWorkerTypesV2`.
+///
+/// Source TL:
+///
+/// ```tl
+/// client.workerTypesV2
+///     types:(vector client.workerTypeV2)
+///     = client.WorkerTypesV2;
+/// ```
 #[derive(Debug, TlRead)]
 #[tl(boxed, id = 0x0cf0dc67)]
 pub struct WorkerTypesV2<'tl> {
@@ -196,6 +367,15 @@ pub struct WorkerTypesV2<'tl> {
 }
 
 /// One model type and its currently available workers.
+///
+/// Source TL:
+///
+/// ```tl
+/// client.workerTypeV2
+///     name:string
+///     workers:(vector client.workerInstanceV2)
+///     = client.WorkerTypeV2;
+/// ```
 #[derive(Debug, TlRead)]
 pub struct WorkerTypeV2<'tl> {
     /// Model name, for example `Qwen/Qwen3-32B`.
@@ -205,6 +385,17 @@ pub struct WorkerTypeV2<'tl> {
 }
 
 /// Worker capacity and price metadata returned by the proxy.
+///
+/// Source TL:
+///
+/// ```tl
+/// client.workerInstanceV2#3ea93d00
+///     flags:#
+///     coefficient:int
+///     active_requests:int
+///     max_active_requests:int
+///     = client.WorkerInstanceV2;
+/// ```
 #[derive(Debug, TlRead)]
 #[non_exhaustive]
 pub struct WorkerInstanceV2 {
@@ -220,6 +411,20 @@ pub struct WorkerInstanceV2 {
 ///
 /// The current HTTP bridge does not expose this object directly, but it is part
 /// of the TL schema and marks the end of a streamed Cocoon answer.
+///
+/// Source TL:
+///
+/// ```tl
+/// client.queryFinalInfo flags:#
+///     tokens_used:tokensUsed
+///     worker_debug:flags.0?string
+///     proxy_debug:flags.0?string
+///     proxy_start_time:flags.1?double
+///     proxy_end_time:flags.1?double
+///     worker_start_time:flags.1?double
+///     worker_end_time:flags.1?double
+///     = client.QueryFinalInfo;
+/// ```
 #[derive(Debug, TlRead)]
 #[non_exhaustive]
 pub struct QueryFinalInfo<'tl> {
@@ -242,6 +447,18 @@ pub struct QueryFinalInfo<'tl> {
 }
 
 /// Token usage counters inside `QueryFinalInfo`.
+///
+/// Source TL:
+///
+/// ```tl
+/// tokensUsed
+///     prompt_tokens_used:long
+///     cached_tokens_used:long
+///     completion_tokens_used:long
+///     reasoning_tokens_used:long
+///     total_tokens_used:long
+///     = TokensUsed;
+/// ```
 #[derive(Debug, Clone, Copy, TlRead)]
 #[allow(clippy::struct_field_names)]
 pub struct TokensUsedTl {
@@ -253,6 +470,30 @@ pub struct TokensUsedTl {
 }
 
 /// Streamed answer variants for `client.runQueryEx`.
+///
+/// Source TL:
+///
+/// ```tl
+/// client.queryAnswerEx
+///     request_id:int256
+///     answer:bytes
+///     flags:#
+///     final_info:flags.0?client.queryFinalInfo
+///     = client.QueryAnswerEx;
+/// client.queryAnswerErrorEx
+///     request_id:int256
+///     error_code:int
+///     error:string
+///     flags:#
+///     final_info:flags.0?client.queryFinalInfo
+///     = client.QueryAnswerEx;
+/// client.queryAnswerPartEx
+///     request_id:int256
+///     answer:bytes
+///     flags:#
+///     final_info:flags.0?client.queryFinalInfo
+///     = client.QueryAnswerEx;
+/// ```
 #[derive(Debug, TlRead)]
 #[tl(boxed)]
 pub enum QueryAnswerEx<'tl> {
