@@ -1,4 +1,6 @@
-# rocoon
+<img src="docs/public/logo.png" alt="Rocoon logo" />
+
+# Rocoon
 
 Minimal Rust prototype for Cocoon client networking.
 
