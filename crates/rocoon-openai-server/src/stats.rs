@@ -126,9 +126,7 @@ impl ServerStats {
             "status": {
                 "enabled": true,
                 "connected": true,
-                "ton_wallet_polling": true,
                 "ton_wallet_polling_ok": client.ton_readonly_ok,
-                "root_contract_polling": false,
                 "ton_readonly_error": &client.ton_readonly_error
             },
             "client": {
@@ -144,8 +142,7 @@ impl ServerStats {
             },
             "blockchain": {
                 "network": "ton",
-                "masterchain_seqno": client.masterchain_seqno,
-                "root_contract_polling": false
+                "masterchain_seqno": client.masterchain_seqno
             },
             "client_contract": client_contract_json(client),
             "wallet": {
@@ -155,17 +152,12 @@ impl ServerStats {
                 "seqno": client.wallet_seqno,
                 "state": &client.wallet_state,
                 "last_tx_lt": client.wallet_last_tx_lt,
-                "pending_transactions_cnt": client.wallet_pending_transactions,
-                "active_transactions_cnt": client.wallet_active_transactions,
-                "wallet_transfer_running": client.wallet_transfer.is_some(),
-                "wallet_transfer": wallet_transfer_json(client),
                 "source": wallet_source(client)
             },
             "payment": {
                 "signed_payment_available": client.payment_status.signed_payment_available,
                 "tokens_committed_to_db": client.payment_status.tokens_committed_to_db,
-                "max_tokens": client.payment_status.max_tokens,
-                "payment_status_endpoint_supported": true
+                "max_tokens": client.payment_status.max_tokens
             },
             "requests": {
                 "completion_started": self.completion_requests_started,
@@ -389,31 +381,7 @@ fn client_contract_json(client: &ClientStatus) -> Value {
         "unlock_ts": contract.unlock_ts,
         "withdrawable_balance": contract.withdrawable_balance,
         "withdrawable_balance_ton": contract.withdrawable_balance.map(format_nanotons_u64_as_ton),
-        "sc_request_running": client.sc_request_running,
-        "sc_request": control_request_json(client)
-    })
-}
-
-fn control_request_json(client: &ClientStatus) -> Value {
-    let Some(request) = &client.sc_request else {
-        return Value::Null;
-    };
-    json!({
-        "action": request.action.as_str(),
-        "query_id": request.query_id,
-        "wallet_seqno": request.wallet_seqno
-    })
-}
-
-fn wallet_transfer_json(client: &ClientStatus) -> Value {
-    let Some(request) = &client.wallet_transfer else {
-        return Value::Null;
-    };
-    json!({
-        "destination_address": &request.destination_address,
-        "amount": request.amount,
-        "amount_ton": format_nanotons_u64_as_ton(request.amount),
-        "wallet_seqno": request.wallet_seqno
+        "sc_request_running": client.sc_request_running
     })
 }
 

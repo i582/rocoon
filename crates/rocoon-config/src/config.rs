@@ -134,21 +134,6 @@ struct TonConfig {
 }
 
 impl RuntimeConfig {
-    /// Loads configuration from `rocoon.toml` or `--config path`.
-    ///
-    /// Missing default config is allowed and falls back to built-in defaults.
-    /// Explicit `--config` paths must exist. Environment variables are applied
-    /// after TOML loading and before validation.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if an explicit config cannot be read, TOML parsing
-    /// fails, environment overrides cannot be parsed, or validation rejects the
-    /// effective configuration.
-    pub fn load() -> Result<Self> {
-        Self::load_from_path(PathBuf::from(DEFAULT_CONFIG_PATH), false, false)
-    }
-
     /// Loads configuration using CLI-selected options.
     ///
     /// # Errors
@@ -163,12 +148,7 @@ impl RuntimeConfig {
         )
     }
 
-    /// Loads configuration from a path selected by the CLI.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the config cannot be loaded or validated.
-    pub fn load_from_path(
+    fn load_from_path(
         config_path: PathBuf,
         explicit_config_path: bool,
         verbose: bool,

@@ -48,14 +48,13 @@ const SECRET_HASH_CONFIRM_INTERVAL: Duration = Duration::from_secs(1);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ConnectVerbosity {
     Quiet,
-    Verbose,
     Interactive,
     InteractiveVerbose,
 }
 
 impl ConnectVerbosity {
     const fn is_verbose(self) -> bool {
-        matches!(self, Self::Verbose | Self::InteractiveVerbose)
+        matches!(self, Self::InteractiveVerbose)
     }
 
     const fn is_interactive(self) -> bool {
@@ -85,10 +84,7 @@ pub struct CocoonClient {
     payment_status: AuthPaymentStatus,
     ton_readonly: TonReadonlyState,
     config: RuntimeConfig,
-    control_request: Option<PendingControlRequest>,
     client_top_up_request: Option<PendingClientTopUpRequest>,
-    wallet_transfer_request: Option<PendingWalletTransferRequest>,
-    client_contract_close_confirmed: bool,
     next_balance_check_at: Instant,
     next_payment_compare_at: Instant,
     verbosity: ConnectVerbosity,
@@ -153,16 +149,8 @@ pub struct ClientStatus {
     pub wallet_state: Option<String>,
     /// Last transaction logical time for the Cocoon wallet account.
     pub wallet_last_tx_lt: Option<u64>,
-    /// Number of queued wallet transactions waiting to be signed/sent.
-    pub wallet_pending_transactions: usize,
-    /// Number of wallet transactions sent and waiting for chain confirmation.
-    pub wallet_active_transactions: usize,
-    /// Running plain wallet transfer, if any.
-    pub wallet_transfer: Option<WalletTransferStatus>,
     /// Whether a client-contract smart-contract request is still running.
     pub sc_request_running: bool,
-    /// Running client-contract request, if any.
-    pub sc_request: Option<ControlRequestStatus>,
     /// Connected client contract account and data-cell state.
     pub client_contract: Option<ClientContractSnapshot>,
 }
@@ -176,28 +164,6 @@ pub struct AuthPaymentStatus {
     pub tokens_committed_to_db: i64,
     /// Maximum tokens the proxy currently allows for this client.
     pub max_tokens: i64,
-}
-
-/// Running smart-contract control request shown in `/stats`.
-#[derive(Clone, Debug)]
-pub struct ControlRequestStatus {
-    /// Action sent to the client contract.
-    pub action: TonControlAction,
-    /// Query id embedded into the client-contract message.
-    pub query_id: u64,
-    /// Cocoon wallet seqno used for the external message.
-    pub wallet_seqno: u32,
-}
-
-/// Running plain Cocoon wallet transfer shown in `/stats`.
-#[derive(Clone, Debug)]
-pub struct WalletTransferStatus {
-    /// Destination TON address.
-    pub destination_address: String,
-    /// Value sent from the Cocoon wallet, in nanotons.
-    pub amount: u64,
-    /// Cocoon wallet seqno used for the external message.
-    pub wallet_seqno: u32,
 }
 
 /// OpenAI-style model metadata derived from `client.getWorkerTypesV2`.
@@ -250,18 +216,6 @@ impl CocoonClient {
     /// proxy authorization, or TON long-auth registration fails.
     pub fn connect(config: &RuntimeConfig) -> Result<Self> {
         Self::connect_with_verbosity(config, ConnectVerbosity::Quiet)
-    }
-
-    /// Opens and authorizes a full Cocoon proxy connection with debug logging.
-    ///
-    /// This is useful for CLI diagnostics while `connect` stays silent enough
-    /// for library callers.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same errors as `connect`.
-    pub fn connect_verbose(config: &RuntimeConfig) -> Result<Self> {
-        Self::connect_with_verbosity(config, ConnectVerbosity::Verbose)
     }
 
     /// Connected client contract address returned by `client.connectToProxy`.
@@ -420,10 +374,7 @@ impl CocoonClient {
             payment_status: authorization.payment_status,
             ton_readonly,
             config: config.clone(),
-            control_request: None,
             client_top_up_request: None,
-            wallet_transfer_request: None,
-            client_contract_close_confirmed: false,
             next_balance_check_at: Instant::now(),
             next_payment_compare_at: Instant::now(),
             verbosity,
@@ -464,25 +415,10 @@ impl CocoonClient {
             .ton_readonly
             .snapshot(&self.config.cocoon_wallet_address, &self.client_sc_address);
         if let Some(client_contract) = &ton.client_contract {
-            self.refresh_control_request(client_contract);
             self.refresh_client_top_up_request(client_contract);
-        }
-        if let Some(wallet) = &ton.wallet {
-            self.refresh_wallet_transfer_request(wallet);
         }
         self.resend_pending_wallet_messages_if_due();
         let wallet = ton.wallet.as_ref();
-        let control_request = self
-            .control_request
-            .as_ref()
-            .map(PendingControlRequest::status);
-        let wallet_transfer = self
-            .wallet_transfer_request
-            .as_ref()
-            .map(PendingWalletTransferRequest::status);
-        let wallet_active_transactions = usize::from(self.control_request.is_some())
-            .saturating_add(usize::from(self.client_top_up_request.is_some()))
-            .saturating_add(usize::from(self.wallet_transfer_request.is_some()));
         ClientStatus {
             proxy_addr: self.config.proxy_addr.clone(),
             owner_address: self.config.owner_address.clone(),
@@ -501,144 +437,9 @@ impl CocoonClient {
             wallet_seqno: wallet.and_then(|wallet| wallet.seqno),
             wallet_state: wallet.map(|wallet| wallet.state.as_str().to_string()),
             wallet_last_tx_lt: wallet.and_then(|wallet| wallet.last_tx_lt),
-            wallet_pending_transactions: 0,
-            wallet_active_transactions,
-            wallet_transfer,
-            sc_request_running: self.sc_request_is_running(),
-            sc_request: control_request,
+            sc_request_running: self.client_top_up_request.is_some(),
             client_contract: ton.client_contract,
         }
-    }
-
-    /// Sends a local control request to the connected Cocoon client contract.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the requested proxy does not match this session,
-    /// TON polling/signing is unavailable, the client contract is not active,
-    /// or the liteserver rejects the external message.
-    pub fn request_control(
-        &mut self,
-        action: TonControlAction,
-        proxy_sc_address: Option<&str>,
-    ) -> Result<TonControlResult> {
-        if let Some(proxy_sc_address) = proxy_sc_address
-            && !proxy_sc_address.is_empty()
-            && proxy_sc_address != self.proxy_sc_address
-        {
-            anyhow::bail!("proxy not found");
-        }
-
-        let ton = self
-            .ton_readonly
-            .snapshot(&self.config.cocoon_wallet_address, &self.client_sc_address);
-        if !ton.ok {
-            anyhow::bail!(
-                "TON state is unavailable: {}",
-                ton.last_error.as_deref().unwrap_or("unknown error")
-            );
-        }
-        let client_contract = ton
-            .client_contract
-            .as_ref()
-            .context("client contract state is unavailable")?;
-        self.refresh_control_request(client_contract);
-        self.refresh_client_top_up_request(client_contract);
-        if let Some(wallet) = &ton.wallet {
-            self.refresh_wallet_transfer_request(wallet);
-        }
-        if self.wallet_transaction_is_running() {
-            self.resend_pending_wallet_messages_if_due();
-            anyhow::bail!("wallet transaction is already running");
-        }
-        validate_client_contract_control(client_contract)?;
-        let wallet = ton
-            .wallet
-            .as_ref()
-            .context("Cocoon wallet state is unavailable")?;
-        let wallet_seqno =
-            validate_cocoon_wallet_can_send_control(&self.config.cocoon_wallet_address, wallet)?;
-
-        let request = TonControlRequest {
-            action,
-            wallet_owner_address: &self.config.owner_address,
-            wallet_address: &self.config.cocoon_wallet_address,
-            wallet_seqno,
-            client_contract_address: &self.client_sc_address,
-            wallet_seed: self.config.node_wallet_key.seed(),
-        };
-        let prepared = self.ton_readonly.prepare_client_control(&request)?;
-        let result = self.ton_readonly.send_prepared_control(&prepared)?;
-        self.control_request = Some(PendingControlRequest::new(&prepared, client_contract));
-        Ok(result)
-    }
-
-    /// Sends all sweepable Cocoon wallet funds to the owner wallet.
-    ///
-    /// The transfer is intentionally allowed only after the connected client
-    /// contract is in Cocoon state `closed`. This keeps the wallet funded while
-    /// the `close` command may still need another on-chain message.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when TON polling/signing is unavailable, the client
-    /// contract is not closed, another wallet transaction is pending, the
-    /// Cocoon wallet is not active, no funds remain above `reserve_nanotons`,
-    /// or the liteserver rejects the external message.
-    pub fn sweep_cocoon_wallet(
-        &mut self,
-        destination_address: Option<&str>,
-        reserve_nanotons: u64,
-    ) -> Result<TonWalletTransferResult> {
-        let ton = self
-            .ton_readonly
-            .snapshot(&self.config.cocoon_wallet_address, &self.client_sc_address);
-        if !ton.ok {
-            anyhow::bail!(
-                "TON state is unavailable: {}",
-                ton.last_error.as_deref().unwrap_or("unknown error")
-            );
-        }
-        let client_contract = ton
-            .client_contract
-            .as_ref()
-            .context("client contract state is unavailable")?;
-        self.refresh_control_request(client_contract);
-        self.refresh_client_top_up_request(client_contract);
-        if let Some(wallet) = &ton.wallet {
-            self.refresh_wallet_transfer_request(wallet);
-        }
-        if self.wallet_transaction_is_running() {
-            self.resend_pending_wallet_messages_if_due();
-            anyhow::bail!("wallet transaction is already running");
-        }
-        validate_client_contract_closed_for_sweep(client_contract)?;
-
-        let wallet = ton
-            .wallet
-            .as_ref()
-            .context("Cocoon wallet state is unavailable")?;
-        let (wallet_seqno, amount) = validate_cocoon_wallet_can_sweep(
-            &self.config.cocoon_wallet_address,
-            wallet,
-            reserve_nanotons,
-        )?;
-        let destination_address = destination_address
-            .filter(|address| !address.is_empty())
-            .unwrap_or(&self.config.owner_address);
-
-        let request = TonWalletTransferRequest {
-            wallet_owner_address: &self.config.owner_address,
-            wallet_address: &self.config.cocoon_wallet_address,
-            wallet_seqno,
-            wallet_seed: self.config.node_wallet_key.seed(),
-            destination_address,
-            amount,
-        };
-        let prepared = self.ton_readonly.prepare_wallet_transfer(&request)?;
-        let result = self.ton_readonly.send_prepared_wallet_transfer(&prepared)?;
-        self.wallet_transfer_request = Some(PendingWalletTransferRequest::new(&prepared, wallet));
-        Ok(result)
     }
 
     /// Returns the current model/worker list from the proxy.
@@ -715,18 +516,12 @@ impl CocoonClient {
 
     /// Replaces the current live session with a fresh authorized connection.
     fn reconnect(&mut self) -> Result<()> {
-        let control_request = self.control_request.clone();
         let client_top_up_request = self.client_top_up_request.clone();
-        let wallet_transfer_request = self.wallet_transfer_request.clone();
-        let client_contract_close_confirmed = self.client_contract_close_confirmed;
         let next_balance_check_at = self.next_balance_check_at;
         let next_payment_compare_at = self.next_payment_compare_at;
         let verbosity = self.verbosity;
         let mut replacement = Self::connect_with_verbosity(&self.config, verbosity)?;
-        replacement.control_request = control_request;
         replacement.client_top_up_request = client_top_up_request;
-        replacement.wallet_transfer_request = wallet_transfer_request;
-        replacement.client_contract_close_confirmed = client_contract_close_confirmed;
         replacement.next_balance_check_at = next_balance_check_at;
         replacement.next_payment_compare_at = next_payment_compare_at;
         replacement.verbosity = verbosity;
@@ -748,17 +543,13 @@ impl CocoonClient {
             .client_contract
             .as_ref()
             .context("client contract state is unavailable")?;
-        self.refresh_control_request(client_contract);
         self.refresh_client_top_up_request(client_contract);
-        if let Some(wallet) = &ton.wallet {
-            self.refresh_wallet_transfer_request(wallet);
-        }
         self.resend_pending_wallet_messages_if_due();
         self.maybe_run_client_top_up(client_contract)
     }
 
     fn maybe_run_client_top_up(&mut self, client_contract: &ClientContractSnapshot) -> Result<()> {
-        if self.wallet_transaction_is_running()
+        if self.client_top_up_request.is_some()
             || client_contract.account_state != TonAccountState::Active
             || client_contract.state_raw.is_none()
             || client_contract
@@ -807,21 +598,6 @@ impl CocoonClient {
         Ok(())
     }
 
-    fn refresh_control_request(&mut self, client_contract: &ClientContractSnapshot) {
-        let Some(request) = self.control_request.as_ref() else {
-            return;
-        };
-        if !request.is_completed_by(client_contract) {
-            return;
-        }
-        if request.action == TonControlAction::RequestRefund
-            && client_contract.state_raw == Some(COCOON_CLIENT_CONTRACT_STATE_CLOSED)
-        {
-            self.client_contract_close_confirmed = true;
-        }
-        self.control_request = None;
-    }
-
     fn refresh_client_top_up_request(&mut self, client_contract: &ClientContractSnapshot) {
         if self
             .client_top_up_request
@@ -832,48 +608,8 @@ impl CocoonClient {
         }
     }
 
-    fn refresh_wallet_transfer_request(&mut self, wallet: &TonWalletSnapshot) {
-        if self
-            .wallet_transfer_request
-            .as_ref()
-            .is_some_and(|request| request.is_completed_by(wallet))
-        {
-            self.wallet_transfer_request = None;
-        }
-    }
-
     fn resend_pending_wallet_messages_if_due(&mut self) {
-        self.resend_control_request_if_due();
         self.resend_client_top_up_if_due();
-        self.resend_wallet_transfer_if_due();
-    }
-
-    fn resend_control_request_if_due(&mut self) {
-        let Some(request) = self.control_request.as_mut() else {
-            return;
-        };
-        if !request.is_resend_due() {
-            return;
-        }
-
-        let external_message = request.external_message.clone();
-        request.mark_resend_attempted();
-        match self.ton_readonly.resend_external_message(&external_message) {
-            Ok(send_status) => {
-                eprintln!(
-                    "resent Cocoon wallet control message: action={} query_id={} send_status={send_status}",
-                    request.action.as_str(),
-                    request.query_id
-                );
-            }
-            Err(error) => {
-                eprintln!(
-                    "failed to resend Cocoon wallet control message: action={} query_id={} error={error:#}",
-                    request.action.as_str(),
-                    request.query_id
-                );
-            }
-        }
     }
 
     fn resend_client_top_up_if_due(&mut self) {
@@ -900,100 +636,6 @@ impl CocoonClient {
                 );
             }
         }
-    }
-
-    fn resend_wallet_transfer_if_due(&mut self) {
-        let Some(request) = self.wallet_transfer_request.as_mut() else {
-            return;
-        };
-        if !request.is_resend_due() {
-            return;
-        }
-
-        let external_message = request.external_message.clone();
-        request.mark_resend_attempted();
-        match self.ton_readonly.resend_external_message(&external_message) {
-            Ok(send_status) => {
-                eprintln!(
-                    "resent Cocoon wallet transfer: destination={} amount={} send_status={send_status}",
-                    request.destination_address, request.amount
-                );
-            }
-            Err(error) => {
-                eprintln!(
-                    "failed to resend Cocoon wallet transfer: destination={} amount={} error={error:#}",
-                    request.destination_address, request.amount
-                );
-            }
-        }
-    }
-
-    const fn sc_request_is_running(&self) -> bool {
-        self.control_request.is_some() || self.client_top_up_request.is_some()
-    }
-
-    const fn wallet_transaction_is_running(&self) -> bool {
-        self.sc_request_is_running() || self.wallet_transfer_request.is_some()
-    }
-}
-
-#[derive(Clone, Debug)]
-struct PendingControlRequest {
-    action: TonControlAction,
-    query_id: u64,
-    wallet_seqno: u32,
-    expected_state_raw: Option<u8>,
-    withdrawable_balance: Option<u64>,
-    external_message: Vec<u8>,
-    next_resend_at: Instant,
-}
-
-impl PendingControlRequest {
-    fn new(message: &TonControlPreparedMessage, snapshot: &ClientContractSnapshot) -> Self {
-        Self {
-            action: message.action,
-            query_id: message.query_id,
-            wallet_seqno: message.wallet_seqno,
-            expected_state_raw: expected_state_after_request(message.action, snapshot.state_raw),
-            withdrawable_balance: snapshot.withdrawable_balance,
-            external_message: message.external_message.clone(),
-            next_resend_at: Instant::now() + CONTROL_RESEND_INTERVAL,
-        }
-    }
-
-    const fn status(&self) -> ControlRequestStatus {
-        ControlRequestStatus {
-            action: self.action,
-            query_id: self.query_id,
-            wallet_seqno: self.wallet_seqno,
-        }
-    }
-
-    fn is_completed_by(&self, snapshot: &ClientContractSnapshot) -> bool {
-        if let Some(expected_state_raw) = self.expected_state_raw
-            && snapshot
-                .state_raw
-                .is_some_and(|state_raw| state_raw >= expected_state_raw)
-        {
-            return true;
-        }
-        if self.action == TonControlAction::Withdraw
-            && let Some(before) = self.withdrawable_balance
-            && snapshot
-                .withdrawable_balance
-                .is_some_and(|current| current < before)
-        {
-            return true;
-        }
-        false
-    }
-
-    fn is_resend_due(&self) -> bool {
-        Instant::now() >= self.next_resend_at
-    }
-
-    fn mark_resend_attempted(&mut self) {
-        self.next_resend_at = Instant::now() + CONTROL_RESEND_INTERVAL;
     }
 }
 
@@ -1029,60 +671,6 @@ impl PendingClientTopUpRequest {
         }
         if let Some(before) = self.request_balance_before
             && snapshot.balance.is_some_and(|current| current > before)
-        {
-            return true;
-        }
-        false
-    }
-
-    fn is_resend_due(&self) -> bool {
-        Instant::now() >= self.next_resend_at
-    }
-
-    fn mark_resend_attempted(&mut self) {
-        self.next_resend_at = Instant::now() + CONTROL_RESEND_INTERVAL;
-    }
-}
-
-#[derive(Clone, Debug)]
-struct PendingWalletTransferRequest {
-    destination_address: String,
-    amount: u64,
-    wallet_seqno: u32,
-    wallet_balance_before: Option<u64>,
-    external_message: Vec<u8>,
-    next_resend_at: Instant,
-}
-
-impl PendingWalletTransferRequest {
-    fn new(message: &TonWalletTransferPreparedMessage, snapshot: &TonWalletSnapshot) -> Self {
-        Self {
-            destination_address: message.destination_address.clone(),
-            amount: message.amount,
-            wallet_seqno: message.wallet_seqno,
-            wallet_balance_before: snapshot.balance,
-            external_message: message.external_message.clone(),
-            next_resend_at: Instant::now() + CONTROL_RESEND_INTERVAL,
-        }
-    }
-
-    fn status(&self) -> WalletTransferStatus {
-        WalletTransferStatus {
-            destination_address: self.destination_address.clone(),
-            amount: self.amount,
-            wallet_seqno: self.wallet_seqno,
-        }
-    }
-
-    fn is_completed_by(&self, snapshot: &TonWalletSnapshot) -> bool {
-        if snapshot
-            .seqno
-            .is_some_and(|current_seqno| current_seqno > self.wallet_seqno)
-        {
-            return true;
-        }
-        if let Some(before) = self.wallet_balance_before
-            && snapshot.balance.is_some_and(|current| current < before)
         {
             return true;
         }
@@ -1546,17 +1134,6 @@ fn validate_cocoon_wallet_can_sweep(
         );
     }
     Ok((wallet_seqno, balance - reserve_nanotons))
-}
-
-const fn expected_state_after_request(
-    action: TonControlAction,
-    current_state_raw: Option<u8>,
-) -> Option<u8> {
-    match (action, current_state_raw) {
-        (TonControlAction::RequestRefund, Some(0)) => Some(1),
-        (TonControlAction::RequestRefund, Some(1)) => Some(2),
-        _ => None,
-    }
 }
 
 const fn client_contract_state_name_for_error(state: u8) -> &'static str {
@@ -2304,28 +1881,6 @@ mod tests {
         }
     }
 
-    fn prepared_wallet_transfer_message() -> TonWalletTransferPreparedMessage {
-        TonWalletTransferPreparedMessage {
-            wallet_seqno: 7,
-            amount: 1_000_000_000,
-            destination_address: "owner".to_string(),
-            wallet_address: "wallet".to_string(),
-            external_message: vec![1, 2, 3],
-        }
-    }
-
-    fn prepared_control_message(action: TonControlAction) -> TonControlPreparedMessage {
-        TonControlPreparedMessage {
-            action,
-            query_id: 42,
-            wallet_seqno: 7,
-            attached_value: CONTROL_MESSAGE_VALUE_NANOTONS,
-            client_contract_address: String::new(),
-            wallet_address: String::new(),
-            external_message: vec![1, 2, 3],
-        }
-    }
-
     #[test]
     fn proxy_client_closing_query_error_is_actionable() {
         let error = anyhow::Error::new(QueryError::new(602, "client is closing"));
@@ -2424,57 +1979,5 @@ mod tests {
         assert!(
             validate_client_contract_closed_for_sweep(&active_client_contract(2, 10, 0)).is_ok()
         );
-    }
-
-    #[test]
-    fn pending_control_does_not_clear_when_only_client_contract_tx_advances() {
-        let before = active_client_contract(0, 10, 1_000_000_000);
-        let pending = PendingControlRequest::new(
-            &prepared_control_message(TonControlAction::Withdraw),
-            &before,
-        );
-
-        assert!(!pending.is_completed_by(&before));
-        assert!(!pending.is_completed_by(&active_client_contract(0, 11, 1_000_000_000)));
-    }
-
-    #[test]
-    fn pending_close_clears_when_expected_contract_state_is_reached() {
-        let before = active_client_contract(0, 10, 1_000_000_000);
-        let pending = PendingControlRequest::new(
-            &prepared_control_message(TonControlAction::RequestRefund),
-            &before,
-        );
-
-        assert!(!pending.is_completed_by(&before));
-        assert!(pending.is_completed_by(&active_client_contract(1, 11, 1_000_000_000)));
-    }
-
-    #[test]
-    fn pending_withdraw_clears_when_withdrawable_balance_decreases() {
-        let before = active_client_contract(0, 10, 1_000_000_000);
-        let pending = PendingControlRequest::new(
-            &prepared_control_message(TonControlAction::Withdraw),
-            &before,
-        );
-
-        assert!(!pending.is_completed_by(&before));
-        assert!(pending.is_completed_by(&active_client_contract(0, 11, 900_000_000)));
-    }
-
-    #[test]
-    fn pending_wallet_transfer_clears_when_wallet_seqno_advances() {
-        let before = active_wallet(2_000_000_000);
-        let pending =
-            PendingWalletTransferRequest::new(&prepared_wallet_transfer_message(), &before);
-        let after = TonWalletSnapshot {
-            balance: before.balance,
-            seqno: Some(8),
-            state: TonAccountState::Active,
-            last_tx_lt: Some(11),
-        };
-
-        assert!(!pending.is_completed_by(&before));
-        assert!(pending.is_completed_by(&after));
     }
 }
