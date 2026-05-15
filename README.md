@@ -61,7 +61,8 @@ connect_timeout_secs = 5
 listen_addr = "127.0.0.1:9999"
 
 [client]
-owner_address = "<cocoon-client-contract-address>"
+owner_address = "<external-owner-wallet-address>"
+node_wallet_key = "<base64-32-byte-node-wallet-private-key>"
 secret = ""
 min_config_version = 0
 
@@ -71,8 +72,10 @@ max_tokens = 10000
 timeout_secs = 120.0
 ```
 
-`client.owner_address` is the Cocoon wallet contract address used by the C++
-client in `client.connectToProxy`, not the external owner wallet address.
+`client.owner_address` matches the C++ client config: it is the external owner
+wallet address. `rocoon` derives the Cocoon wallet smart-contract address from
+`client.owner_address` and `client.node_wallet_key`, then sends that derived
+contract address in `client.connectToProxy`.
 
 Use a different config file:
 
@@ -83,7 +86,7 @@ cargo run -- --config path/to/rocoon.toml
 Environment overrides:
 
 ```bash
-COCOON_PROXY_ADDR=91.108.4.11:8888 COCOON_OWNER_ADDRESS=<cocoon-client-contract-address> COCOON_CLIENT_SECRET=... cargo run
+COCOON_PROXY_ADDR=91.108.4.11:8888 COCOON_OWNER_ADDRESS=<owner-wallet-address> COCOON_NODE_WALLET_KEY=... COCOON_CLIENT_SECRET=... cargo run
 ```
 
 API:

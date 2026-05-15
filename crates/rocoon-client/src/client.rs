@@ -215,8 +215,12 @@ fn json_request_headers(body_len: usize) -> Vec<(&'static str, String)> {
 /// authorization requires on-chain registration/top-up and is intentionally not
 /// implemented here.
 fn authorize(session: &mut Session<ratls::RatlsStream>, config: &RuntimeConfig) -> Result<i32> {
-    println!("authenticating as {}", config.owner_address);
-    let request = cocoon::encode_connect_to_proxy(&config.owner_address, config.min_config_version);
+    println!(
+        "authenticating owner {} via Cocoon wallet {}",
+        config.owner_address, config.cocoon_wallet_address
+    );
+    let request =
+        cocoon::encode_connect_to_proxy(&config.cocoon_wallet_address, config.min_config_version);
     let response = session
         .make_request(&request)
         .context("client.connectToProxy")?;

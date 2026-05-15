@@ -291,11 +291,11 @@ pub enum QueryAnswerEx<'tl> {
 
 /// Encodes `client.connectToProxy`.
 #[must_use]
-pub fn encode_connect_to_proxy(owner_address: &str, min_config_version: i32) -> Vec<u8> {
+pub fn encode_connect_to_proxy(client_owner_address: &str, min_config_version: i32) -> Vec<u8> {
     tl_proto::serialize(ClientConnectToProxy {
         params: ClientParams {
             _flags: (),
-            client_owner_address: owner_address.as_bytes(),
+            client_owner_address: client_owner_address.as_bytes(),
             is_test: Some(false),
             min_proto_version: Some(1),
             max_proto_version: Some(4),

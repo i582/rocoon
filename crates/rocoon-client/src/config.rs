@@ -15,6 +15,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
+use crate::wallet;
+
 const DEFAULT_CONFIG_PATH: &str = "rocoon.toml";
 const DEFAULT_PROXY_ADDR: &str = "91.108.4.11:8888";
 const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 5;
@@ -33,8 +35,10 @@ pub struct RuntimeConfig {
     pub connect_timeout: Duration,
     /// Local OpenAI-compatible HTTP listen address.
     pub listen_addr: String,
-    /// Cocoon client smart-contract address used in `client.connectToProxy`.
+    /// External TON wallet address that owns the Cocoon wallet contract.
     pub owner_address: String,
+    /// Derived Cocoon wallet smart-contract address used in `client.connectToProxy`.
+    pub cocoon_wallet_address: String,
     /// Shared secret for short proxy authorization.
     pub client_secret: Option<String>,
     /// Minimum accepted on-chain Cocoon config version.
@@ -77,6 +81,7 @@ struct ServerConfig {
 #[serde(default, deny_unknown_fields)]
 struct ClientConfig {
     owner_address: String,
+    node_wallet_key: String,
     secret: Option<String>,
     min_config_version: i32,
 }
@@ -119,6 +124,9 @@ impl RuntimeConfig {
         if let Ok(value) = env::var("COCOON_OWNER_ADDRESS") {
             config.client.owner_address = value;
         }
+        if let Ok(value) = env::var("COCOON_NODE_WALLET_KEY") {
+            config.client.node_wallet_key = value;
+        }
         if let Ok(value) = env::var("COCOON_CLIENT_SECRET") {
             config.client.secret = Some(value);
         }
@@ -138,6 +146,13 @@ impl RuntimeConfig {
                 value.parse().context("parse COCOON_REQUEST_TIMEOUT_SECS")?;
         }
         validate(&config)?;
+        let cocoon_wallet_address = wallet::derive_cocoon_wallet_address(
+            &config.client.owner_address,
+            &config.client.node_wallet_key,
+        )
+        .context(
+            "derive Cocoon wallet address from client.owner_address and client.node_wallet_key",
+        )?;
 
         Ok(Self {
             config_path,
@@ -145,6 +160,7 @@ impl RuntimeConfig {
             connect_timeout: Duration::from_secs(config.network.connect_timeout_secs),
             listen_addr: config.server.listen_addr,
             owner_address: config.client.owner_address,
+            cocoon_wallet_address,
             client_secret: config.client.secret,
             min_config_version: config.client.min_config_version,
             max_coefficient: config.request.max_coefficient,
@@ -240,6 +256,9 @@ fn validate(config: &FileConfig) -> Result<()> {
     }
     if config.client.owner_address.trim().is_empty() {
         anyhow::bail!("client.owner_address must not be empty");
+    }
+    if config.client.node_wallet_key.trim().is_empty() {
+        anyhow::bail!("client.node_wallet_key must not be empty");
     }
     if config.request.max_coefficient < 0 {
         anyhow::bail!("request.max_coefficient must not be negative");

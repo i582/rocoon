@@ -18,10 +18,15 @@ unsafe_code = "forbid"
 warnings = "deny"
 
 [workspace.lints.clippy]
-all = "deny"
-cargo = "deny"
-nursery = "deny"
-pedantic = "deny"
+all = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+
+# `ton_core` pulls `ton_macros`, whose proc-macro stack currently resolves a
+# few dependency families in multiple versions. This is not actionable in
+# rocoon without forking ton-rs.
+multiple_crate_versions = "allow"
 
 unwrap_used = "deny"
 dbg_macro = "deny"
@@ -31,6 +36,8 @@ panic = "deny"
 
 [workspace.dependencies]
 anyhow = "1"
+base64 = "0.22"
+ed25519-dalek = "2.2"
 rand = "0.8"
 rcgen = { version = "0.13", features = ["crypto", "pem"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
@@ -38,6 +45,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tl-proto = "0.5"
+ton_core = "0.1.1"
 toml = "0.8"
 
 [package]

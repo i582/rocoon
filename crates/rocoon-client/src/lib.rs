@@ -6,6 +6,7 @@
 
 mod client;
 pub mod config;
+mod wallet;
 
 pub use client::{CocoonClient, HttpExchange, ModelInfo, WorkerInfo};
 pub use config::RuntimeConfig;
