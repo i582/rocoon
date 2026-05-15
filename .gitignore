@@ -1,4 +1,5 @@
 /target
 .idea/
 rocoon.toml
+.rocoon-state
 AGENTS.md

@@ -35,6 +35,7 @@ use ton_core::errors::TonCoreError;
 use crate::{config::TonRuntimeConfig, wallet};
 
 const OWNER_CLIENT_REGISTER: u32 = 0xc45f_9f3b;
+const OWNER_CLIENT_CHANGE_SECRET_HASH: u32 = 0xa935_7034;
 const EXT_CLIENT_TOP_UP: u32 = 0xf172_e6c2;
 pub const CONTROL_MESSAGE_VALUE_NANOTONS: u64 = 700_000_000;
 const ACTIVE_CLIENT_REGISTER_VALUE_NANOTONS: u64 = 1_000_000_000;
@@ -103,6 +104,8 @@ pub struct ClientContractSnapshot {
     pub tokens_used: Option<u64>,
     /// Refund unlock timestamp from the client contract data cell.
     pub unlock_ts: Option<u32>,
+    /// Short-auth secret hash stored by the client contract.
+    pub secret_hash: Option<[u8; 32]>,
     /// Balance above stake that can be withdrawn.
     pub withdrawable_balance: Option<u64>,
 }
@@ -171,6 +174,22 @@ pub struct TonClientTopUpRequest<'a> {
     pub root_contract_address: &'a str,
     /// Client contract address returned by `client.connectToProxy`.
     pub client_contract_address: &'a str,
+    /// Ed25519 seed used by the Cocoon wallet contract.
+    pub wallet_seed: &'a [u8; 32],
+}
+
+/// Inputs needed to update the short-auth secret hash on a client contract.
+pub struct TonClientSecretHashRequest<'a> {
+    /// External owner wallet address used to build Cocoon wallet state init.
+    pub wallet_owner_address: &'a str,
+    /// Cocoon wallet contract address.
+    pub wallet_address: &'a str,
+    /// Cocoon wallet seqno used for signing.
+    pub wallet_seqno: u32,
+    /// Connected client contract address returned by `client.connectToProxy`.
+    pub client_contract_address: &'a str,
+    /// Desired `sha256(secret)` value accepted by short auth.
+    pub secret_hash: &'a [u8; 32],
     /// Ed25519 seed used by the Cocoon wallet contract.
     pub wallet_seed: &'a [u8; 32],
 }
@@ -252,6 +271,23 @@ pub struct TonClientTopUpPreparedMessage {
     pub external_message: Vec<u8>,
 }
 
+/// Signed external message prepared for `owner_client_change_secret_hash`.
+#[derive(Clone, Debug)]
+pub struct TonClientSecretHashPreparedMessage {
+    /// Random query id embedded into `owner_client_change_secret_hash`.
+    pub query_id: u64,
+    /// Cocoon wallet seqno used for signing.
+    pub wallet_seqno: u32,
+    /// Attached internal message value in nanotons.
+    pub attached_value: u64,
+    /// Destination client contract address.
+    pub client_contract_address: String,
+    /// Cocoon wallet address that signed the external message.
+    pub wallet_address: String,
+    /// Full TON external message BOC.
+    pub external_message: Vec<u8>,
+}
+
 /// Signed external message prepared for a plain Cocoon wallet transfer.
 #[derive(Clone, Debug)]
 pub struct TonWalletTransferPreparedMessage {
@@ -314,6 +350,23 @@ pub struct TonClientTopUpResult {
     pub wallet_seqno: u32,
     /// Amount added to the client request balance, in nanotons.
     pub top_up_amount: u64,
+    /// Attached internal message value in nanotons.
+    pub attached_value: u64,
+    /// Liteserver send status returned by `liteServer.sendMessage`.
+    pub send_status: u32,
+    /// Destination client contract address.
+    pub client_contract_address: String,
+    /// Cocoon wallet address that signed the external message.
+    pub wallet_address: String,
+}
+
+/// Result returned after secret-hash update is accepted by a liteserver.
+#[derive(Clone, Debug)]
+pub struct TonClientSecretHashResult {
+    /// Random query id embedded into `owner_client_change_secret_hash`.
+    pub query_id: u64,
+    /// Cocoon wallet seqno used for signing.
+    pub wallet_seqno: u32,
     /// Attached internal message value in nanotons.
     pub attached_value: u64,
     /// Liteserver send status returned by `liteServer.sendMessage`.
@@ -441,6 +494,52 @@ impl TonReadonlyClient {
 
         Ok(TonControlPreparedMessage {
             action: request.action,
+            query_id,
+            wallet_seqno: request.wallet_seqno,
+            attached_value: CONTROL_MESSAGE_VALUE_NANOTONS,
+            client_contract_address: request.client_contract_address.to_string(),
+            wallet_address: request.wallet_address.to_string(),
+            external_message: external_msg,
+        })
+    }
+
+    /// Builds and signs an `owner_client_change_secret_hash` message.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if addresses are invalid or signing/cell serialization fails.
+    pub fn prepare_client_secret_hash_message(
+        request: &TonClientSecretHashRequest<'_>,
+    ) -> Result<TonClientSecretHashPreparedMessage> {
+        let wallet_owner_address = TonAddress::from_str(request.wallet_owner_address)
+            .context("parse Cocoon wallet owner address")?;
+        let wallet_address =
+            TonAddress::from_str(request.wallet_address).context("parse Cocoon wallet address")?;
+        let client_contract_address = TonAddress::from_str(request.client_contract_address)
+            .context("parse Cocoon client contract address")?;
+        let query_id = random_query_id();
+        let client_body =
+            build_client_secret_hash_body(request.secret_hash, query_id, &wallet_address)
+                .context("build client contract secret hash body")?;
+        let internal_msg = build_internal_message(
+            &client_contract_address,
+            CONTROL_MESSAGE_VALUE_NANOTONS,
+            client_body,
+        );
+        let internal_msg_cell = internal_msg
+            .to_cell()
+            .context("serialize wallet-forwarded secret hash message")?;
+
+        let external_msg = build_wallet_external_message(
+            &wallet_address,
+            &wallet_owner_address,
+            request.wallet_seed,
+            request.wallet_seqno,
+            internal_msg_cell,
+        )
+        .context("build signed Cocoon wallet secret hash message")?;
+
+        Ok(TonClientSecretHashPreparedMessage {
             query_id,
             wallet_seqno: request.wallet_seqno,
             attached_value: CONTROL_MESSAGE_VALUE_NANOTONS,
@@ -685,6 +784,26 @@ impl TonReadonlyClient {
         })
     }
 
+    /// Sends a previously prepared Cocoon client secret-hash update.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the liteserver rejects `sendMessage`.
+    pub fn send_prepared_client_secret_hash_message(
+        &self,
+        message: &TonClientSecretHashPreparedMessage,
+    ) -> Result<TonClientSecretHashResult> {
+        let send_status = self.send_raw_message(&message.external_message)?;
+        Ok(TonClientSecretHashResult {
+            query_id: message.query_id,
+            wallet_seqno: message.wallet_seqno,
+            attached_value: message.attached_value,
+            send_status,
+            client_contract_address: message.client_contract_address.clone(),
+            wallet_address: message.wallet_address.clone(),
+        })
+    }
+
     /// Sends a previously prepared long-auth registration message.
     ///
     /// # Errors
@@ -916,6 +1035,7 @@ impl ClientContractSnapshot {
             stake,
             tokens_used: data.as_ref().map(|data| data.tokens_used),
             unlock_ts: data.as_ref().map(|data| data.unlock_ts),
+            secret_hash: data.as_ref().map(|data| *data.secret_hash.as_slice_sized()),
             withdrawable_balance: balance
                 .zip(stake)
                 .map(|(balance, stake)| balance.saturating_sub(stake)),
@@ -1365,6 +1485,21 @@ fn build_client_register_body(
         .context("build client contract register body cell")
 }
 
+fn build_client_secret_hash_body(
+    secret_hash: &[u8; 32],
+    query_id: u64,
+    wallet_address: &TonAddress,
+) -> Result<TonCell> {
+    let mut builder = TonCell::builder();
+    builder.write_num(&OWNER_CLIENT_CHANGE_SECRET_HASH, 32)?;
+    builder.write_num(&query_id, 64)?;
+    builder.write_bits(secret_hash, 256)?;
+    wallet_address.to_msg_address_int().write(&mut builder)?;
+    builder
+        .build()
+        .context("build client contract secret hash body cell")
+}
+
 fn build_client_top_up_body(
     top_up_amount: u64,
     query_id: u64,
@@ -1730,6 +1865,7 @@ mod tests {
                 stake: Some(stake),
                 tokens_used: Some(0),
                 unlock_ts: Some(0),
+                secret_hash: Some([0; 32]),
                 withdrawable_balance: Some(balance.saturating_sub(stake)),
             },
         }

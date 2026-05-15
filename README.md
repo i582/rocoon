@@ -44,7 +44,7 @@ Not implemented yet:
 Run:
 
 ```bash
-cargo run
+cargo run -- start
 ```
 
 Checks:
@@ -99,13 +99,29 @@ the built-in mainnet/testnet config from `ton-rs`.
 Use a different config file:
 
 ```bash
-cargo run -- --config path/to/rocoon.toml
+cargo run -- --config path/to/rocoon.toml start
 ```
+
+CLI one-shot controls:
+
+```bash
+cargo run -- request-withdraw
+cargo run -- close
+cargo run -- withdraw --client-contract <client-contract-address>
+cargo run -- withdraw --to <destination-address> --reserve-nanotons 100000000
+```
+
+`request-withdraw` sends `owner_client_withdraw` from the client contract to the
+Cocoon wallet. `close` sends `owner_client_request_refund`. `withdraw` or
+`sweep` sends the sweepable Cocoon wallet balance to `client.owner_address` or
+`--to`. If proxy discovery cannot resolve an already closed client contract,
+`rocoon` first tries the locally cached client contract from `.rocoon-state`;
+if there is no matching cache, pass the contract address with `--client-contract`.
 
 Environment overrides:
 
 ```bash
-COCOON_PROXY_ADDR=91.108.4.11:8888 COCOON_OWNER_ADDRESS=<owner-wallet-address> COCOON_NODE_WALLET_KEY=... COCOON_CLIENT_SECRET=... ROCOON_TON_READONLY_ENABLED=true cargo run
+COCOON_PROXY_ADDR=91.108.4.11:8888 COCOON_OWNER_ADDRESS=<owner-wallet-address> COCOON_NODE_WALLET_KEY=... COCOON_CLIENT_SECRET=... ROCOON_TON_READONLY_ENABLED=true cargo run -- start
 ```
 
 API:
@@ -133,7 +149,6 @@ Control endpoints:
 - `GET/POST /request/close` sends `owner_client_request_refund` to the current client contract.
 - `GET/POST /wallet/withdraw` sends the sweepable Cocoon wallet balance to `client.owner_address` after `/request/close` was confirmed by this `rocoon` process.
 - `/wallet/withdraw` keeps `100000000` nanotons by default for fees; override with `?reserve_nanotons=<value>` or JSON `{"reserve_nanotons":100000000}`.
-- If the contract was already closed before this process started, pass `?force=true` after checking `/stats.client_contract.state`.
 
 When the proxy returns `auth: short`, `rocoon` uses `client.secret` or
 `COCOON_CLIENT_SECRET` to call `client.authorizeWithProxyShort`.

@@ -10,6 +10,7 @@ use std::error::Error;
 use std::fmt;
 use std::io::{self, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -21,6 +22,7 @@ use crate::ton_readonly::{
     COCOON_WALLET_MIN_BALANCE_NANOTONS, COCOON_WALLET_RESERVE_NANOTONS,
     CONTROL_MESSAGE_VALUE_NANOTONS, ClientContractSnapshot, TonAccountState,
     TonClientRegisterPreparedMessage, TonClientRegisterRequest, TonClientRegisterResult,
+    TonClientSecretHashPreparedMessage, TonClientSecretHashRequest, TonClientSecretHashResult,
     TonClientTopUpPreparedMessage, TonClientTopUpRequest, TonClientTopUpResult, TonControlAction,
     TonControlPreparedMessage, TonControlRequest, TonControlResult, TonReadonlyClient,
     TonReadonlySnapshot, TonWalletSnapshot, TonWalletTransferPreparedMessage,
@@ -38,6 +40,8 @@ const PAYMENT_COMPARE_MAX_SECS: f64 = 20.0;
 const COCOON_CLIENT_CONTRACT_STATE_CLOSED: u8 = 2;
 const INTERACTIVE_REQUIRED_WALLET_BALANCE_NANOTONS: u64 = 20_000_000_000;
 const NANOTONS_PER_TON: u64 = 1_000_000_000;
+const SECRET_HASH_CONFIRM_ATTEMPTS: usize = 30;
+const SECRET_HASH_CONFIRM_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ConnectVerbosity {
@@ -271,45 +275,103 @@ impl CocoonClient {
         }
     }
 
+    /// Sends one client-contract withdraw request and exits without running HTTP.
+    ///
+    /// This withdraws the balance above stake from the client contract back to
+    /// the Cocoon wallet. It does not sweep the Cocoon wallet to the owner
+    /// address; use `sweep_cocoon_wallet_interactive` for that second step.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if proxy discovery, TON state reads, wallet signing, or
+    /// liteserver message submission fails.
+    pub fn request_withdraw_interactive(
+        config: &RuntimeConfig,
+        client_contract_address: Option<&str>,
+    ) -> Result<TonControlResult> {
+        Self::request_control_interactive(
+            config,
+            client_contract_address,
+            TonControlAction::Withdraw,
+        )
+    }
+
+    /// Sends one client-contract close request and exits without running HTTP.
+    ///
+    /// If `client_contract_address` is omitted, this performs only lightweight
+    /// proxy discovery (`client.connectToProxy`) to learn the client contract
+    /// address, then sends the TON control message directly through the Cocoon
+    /// wallet.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if proxy discovery, TON state reads, wallet signing, or
+    /// liteserver message submission fails.
+    pub fn request_close_interactive(
+        config: &RuntimeConfig,
+        client_contract_address: Option<&str>,
+    ) -> Result<TonControlResult> {
+        Self::request_control_interactive(
+            config,
+            client_contract_address,
+            TonControlAction::RequestRefund,
+        )
+    }
+
+    fn request_control_interactive(
+        config: &RuntimeConfig,
+        client_contract_address: Option<&str>,
+        action: TonControlAction,
+    ) -> Result<TonControlResult> {
+        let action_name = match action {
+            TonControlAction::Withdraw => "withdraw",
+            TonControlAction::RequestRefund => "close",
+        };
+        let verbosity = ConnectVerbosity::interactive(config.verbose);
+        let client_contract_address =
+            resolve_client_contract_address(config, client_contract_address, verbosity)?;
+        println!(
+            "{} Sending {action_name} request to {}",
+            color_status("info"),
+            client_contract_address
+        );
+        send_client_control_from_config(config, &client_contract_address, action)
+    }
+
+    /// Sends all sweepable Cocoon wallet funds and exits without running HTTP.
+    ///
+    /// If `client_contract_address` is omitted, this tries lightweight proxy
+    /// discovery. For an already closed contract the proxy may reject discovery,
+    /// so CLI callers should pass the address printed by `--close`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the client contract address cannot be discovered,
+    /// the contract is not closed, or the wallet transfer cannot be sent.
+    pub fn sweep_cocoon_wallet_interactive(
+        config: &RuntimeConfig,
+        client_contract_address: Option<&str>,
+        destination_address: Option<&str>,
+        reserve_nanotons: u64,
+    ) -> Result<TonWalletTransferResult> {
+        let verbosity = ConnectVerbosity::interactive(config.verbose);
+        let client_contract_address =
+            resolve_client_contract_address(config, client_contract_address, verbosity)?;
+        println!(
+            "{} Sweeping Cocoon wallet via client contract {}",
+            color_status("info"),
+            client_contract_address
+        );
+        sweep_cocoon_wallet_from_config(
+            config,
+            &client_contract_address,
+            destination_address,
+            reserve_nanotons,
+        )
+    }
+
     fn connect_with_verbosity(config: &RuntimeConfig, verbosity: ConnectVerbosity) -> Result<Self> {
-        let addr = &config.proxy_addr;
-        if verbosity.is_verbose() {
-            println!("connecting to Cocoon proxy at {addr}");
-        }
-        let socket_addr = addr
-            .to_socket_addrs()
-            .with_context(|| format!("resolve {addr}"))?
-            .next()
-            .with_context(|| format!("no socket addresses for {addr}"))?;
-
-        let mut tcp = TcpStream::connect_timeout(&socket_addr, config.connect_timeout)
-            .with_context(|| format!("connect TCP to {socket_addr} (from {addr})"))?;
-        tcp.set_nodelay(true).context("set TCP_NODELAY")?;
-
-        let pow = pow::handshake(&mut tcp).context("Cocoon TCP PoW handshake")?;
-        if verbosity.is_verbose() {
-            println!(
-                "pow solved: difficulty={} nonce={} elapsed_ms={}",
-                pow.difficulty,
-                pow.nonce,
-                pow.elapsed.as_millis()
-            );
-        }
-
-        let tls = ratls::connect(tcp).context("Cocoon RA-TLS handshake")?;
-        if verbosity.is_verbose() {
-            println!(
-                "tls connected: server_cert_der_len={}",
-                tls.server_cert_der_len()
-            );
-        }
-
-        let (mut session, connected) =
-            Session::connect(tls).context("Cocoon tcp.connect session handshake")?;
-        if verbosity.is_verbose() {
-            println!("session connected: id={}", connected.id);
-        }
-
+        let mut session = open_session(config, verbosity)?;
         let mut ton_readonly = TonReadonlyState::new(config);
         let authorization = authorize(&mut session, config, &mut ton_readonly, verbosity)?;
 
@@ -1138,6 +1200,17 @@ impl TonReadonlyState {
         }
     }
 
+    fn prepare_client_secret_hash(
+        &self,
+        request: &TonClientSecretHashRequest<'_>,
+    ) -> Result<TonClientSecretHashPreparedMessage> {
+        match self {
+            Self::Disabled => anyhow::bail!("TON liteclient is disabled"),
+            Self::Failed { error, .. } => anyhow::bail!("TON liteclient is unavailable: {error}"),
+            Self::Ready { .. } => TonReadonlyClient::prepare_client_secret_hash_message(request),
+        }
+    }
+
     fn prepare_client_top_up(
         &mut self,
         request: &TonClientTopUpRequest<'_>,
@@ -1267,6 +1340,57 @@ impl TonReadonlyState {
                                 *client = replacement;
                                 client
                                     .send_prepared_client_top_up_message(message)
+                                    .with_context(|| {
+                                        format!(
+                                            "{first_error:#}; retry after reconnect also failed"
+                                        )
+                                    })
+                            }
+                            Err(reconnect_error) => {
+                                anyhow::bail!(
+                                    "{first_error:#}; reconnect failed: {reconnect_error:#}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn send_prepared_client_secret_hash(
+        &mut self,
+        message: &TonClientSecretHashPreparedMessage,
+    ) -> Result<TonClientSecretHashResult> {
+        match self {
+            Self::Disabled => anyhow::bail!("TON liteclient is disabled"),
+            Self::Failed { config, error } => {
+                eprintln!("TON liteclient is unavailable, reconnecting: {error}");
+                let config = config.clone();
+                match TonReadonlyClient::connect(&config) {
+                    Ok(client) => {
+                        *self = Self::Ready { config, client };
+                        self.send_prepared_client_secret_hash(message)
+                    }
+                    Err(reconnect_error) => {
+                        anyhow::bail!(
+                            "TON liteclient is unavailable: {error}; reconnect failed: {reconnect_error:#}"
+                        );
+                    }
+                }
+            }
+            Self::Ready { config, client } => {
+                match client.send_prepared_client_secret_hash_message(message) {
+                    Ok(result) => Ok(result),
+                    Err(first_error) => {
+                        eprintln!(
+                            "client secret-hash send failed, reconnecting liteclient: {first_error:#}"
+                        );
+                        match TonReadonlyClient::connect(config) {
+                            Ok(replacement) => {
+                                *client = replacement;
+                                client
+                                    .send_prepared_client_secret_hash_message(message)
                                     .with_context(|| {
                                         format!(
                                             "{first_error:#}; retry after reconnect also failed"
@@ -1499,12 +1623,123 @@ struct AuthorizationInfo {
     payment_status: AuthPaymentStatus,
 }
 
+struct ConnectedProxyInfo {
+    proto_version: i32,
+    proxy_owner_address: String,
+    proxy_sc_address: String,
+    client_sc_address: String,
+    proxy_public_key: [u8; 32],
+    auth: ProxyAuthInfo,
+}
+
+enum ProxyAuthInfo {
+    Short { secret_hash: [u8; 32], nonce: i64 },
+    Long { nonce: i64 },
+}
+
 #[derive(Clone, Copy)]
 struct LongAuthParams<'a> {
     nonce: u64,
     client_sc_address: &'a str,
     proxy_sc_address: &'a str,
     proxy_public_key: &'a [u8; 32],
+    prompt_for_funding: bool,
+}
+
+fn open_session(
+    config: &RuntimeConfig,
+    verbosity: ConnectVerbosity,
+) -> Result<Session<ratls::RatlsStream>> {
+    let addr = &config.proxy_addr;
+    if verbosity.is_verbose() {
+        println!("connecting to Cocoon proxy at {addr}");
+    }
+    let socket_addr = addr
+        .to_socket_addrs()
+        .with_context(|| format!("resolve {addr}"))?
+        .next()
+        .with_context(|| format!("no socket addresses for {addr}"))?;
+
+    let mut tcp = TcpStream::connect_timeout(&socket_addr, config.connect_timeout)
+        .with_context(|| format!("connect TCP to {socket_addr} (from {addr})"))?;
+    tcp.set_nodelay(true).context("set TCP_NODELAY")?;
+
+    let pow = pow::handshake(&mut tcp).context("Cocoon TCP PoW handshake")?;
+    if verbosity.is_verbose() {
+        println!(
+            "pow solved: difficulty={} nonce={} elapsed_ms={}",
+            pow.difficulty,
+            pow.nonce,
+            pow.elapsed.as_millis()
+        );
+    }
+
+    let tls = ratls::connect(tcp).context("Cocoon RA-TLS handshake")?;
+    if verbosity.is_verbose() {
+        println!(
+            "tls connected: server_cert_der_len={}",
+            tls.server_cert_der_len()
+        );
+    }
+
+    let (session, connected) =
+        Session::connect(tls).context("Cocoon tcp.connect session handshake")?;
+    if verbosity.is_verbose() {
+        println!("session connected: id={}", connected.id);
+    }
+    Ok(session)
+}
+
+fn discover_proxy_info(
+    config: &RuntimeConfig,
+    verbosity: ConnectVerbosity,
+) -> Result<ConnectedProxyInfo> {
+    let mut session = open_session(config, verbosity)?;
+    connect_to_proxy(&mut session, config)
+}
+
+fn resolve_client_contract_address(
+    config: &RuntimeConfig,
+    client_contract_address: Option<&str>,
+    verbosity: ConnectVerbosity,
+) -> Result<String> {
+    if let Some(address) = client_contract_address.filter(|address| !address.is_empty()) {
+        return Ok(address.to_string());
+    }
+    println!("{} Resolving Cocoon client contract", color_status("info"));
+    Ok(discover_proxy_info(config, verbosity)
+        .context("discover client contract; pass --client-contract if the proxy cannot resolve it")?
+        .client_sc_address)
+}
+
+fn connect_to_proxy(
+    session: &mut Session<ratls::RatlsStream>,
+    config: &RuntimeConfig,
+) -> Result<ConnectedProxyInfo> {
+    let request =
+        cocoon::encode_connect_to_proxy(&config.cocoon_wallet_address, config.min_config_version);
+    let response = session
+        .make_request(&request)
+        .context("client.connectToProxy")?;
+    let connected_to_proxy = cocoon::decode_connected_to_proxy(&response)?;
+    let auth = match connected_to_proxy.auth {
+        cocoon::ProxyConnectionAuth::Short { secret_hash, nonce } => ProxyAuthInfo::Short {
+            secret_hash: *secret_hash,
+            nonce,
+        },
+        cocoon::ProxyConnectionAuth::Long { nonce } => ProxyAuthInfo::Long { nonce },
+    };
+    Ok(ConnectedProxyInfo {
+        proto_version: connected_to_proxy.params.proto_version.unwrap_or(0),
+        proxy_owner_address: String::from_utf8_lossy(connected_to_proxy.params.proxy_owner_address)
+            .into_owned(),
+        proxy_sc_address: String::from_utf8_lossy(connected_to_proxy.params.proxy_sc_address)
+            .into_owned(),
+        client_sc_address: String::from_utf8_lossy(connected_to_proxy.client_sc_address)
+            .into_owned(),
+        proxy_public_key: *connected_to_proxy.params.proxy_public_key,
+        auth,
+    })
 }
 
 /// Performs Cocoon proxy authorization and returns the negotiated protocol version.
@@ -1520,25 +1755,12 @@ fn authorize(
             config.owner_address, config.cocoon_wallet_address
         );
     }
-    let request =
-        cocoon::encode_connect_to_proxy(&config.cocoon_wallet_address, config.min_config_version);
-    let response = session
-        .make_request(&request)
-        .context("client.connectToProxy")?;
-    let connected_to_proxy = cocoon::decode_connected_to_proxy(&response)?;
-    let proto_version = connected_to_proxy.params.proto_version.unwrap_or(0);
-    let proxy_owner_address =
-        String::from_utf8_lossy(connected_to_proxy.params.proxy_owner_address).into_owned();
-    let proxy_sc_address =
-        String::from_utf8_lossy(connected_to_proxy.params.proxy_sc_address).into_owned();
-    let client_sc_address =
-        String::from_utf8_lossy(connected_to_proxy.client_sc_address).into_owned();
+    let connected_to_proxy = connect_to_proxy(session, config)?;
 
-    let proxy_public_key = *connected_to_proxy.params.proxy_public_key;
     let payment_status = match connected_to_proxy.auth {
-        cocoon::ProxyConnectionAuth::Short { secret_hash, nonce } => {
+        ProxyAuthInfo::Short { secret_hash, nonce } => {
             if let Some(secret) = config.client_secret.as_deref()
-                && secret_hash_matches(secret, secret_hash)
+                && secret_hash_matches(secret, &secret_hash)
             {
                 authorize_short(session, secret, verbosity)?
             } else {
@@ -1553,33 +1775,35 @@ fn authorize(
                     ton_readonly,
                     LongAuthParams {
                         nonce: tl_long_to_u64(nonce),
-                        client_sc_address: &client_sc_address,
-                        proxy_sc_address: &proxy_sc_address,
-                        proxy_public_key: &proxy_public_key,
+                        client_sc_address: &connected_to_proxy.client_sc_address,
+                        proxy_sc_address: &connected_to_proxy.proxy_sc_address,
+                        proxy_public_key: &connected_to_proxy.proxy_public_key,
+                        prompt_for_funding: false,
                     },
                     verbosity,
                 )?
             }
         }
-        cocoon::ProxyConnectionAuth::Long { nonce } => authorize_long(
+        ProxyAuthInfo::Long { nonce } => authorize_long(
             session,
             config,
             ton_readonly,
             LongAuthParams {
                 nonce: tl_long_to_u64(nonce),
-                client_sc_address: &client_sc_address,
-                proxy_sc_address: &proxy_sc_address,
-                proxy_public_key: &proxy_public_key,
+                client_sc_address: &connected_to_proxy.client_sc_address,
+                proxy_sc_address: &connected_to_proxy.proxy_sc_address,
+                proxy_public_key: &connected_to_proxy.proxy_public_key,
+                prompt_for_funding: true,
             },
             verbosity,
         )?,
     };
 
     Ok(AuthorizationInfo {
-        proto_version,
-        proxy_owner_address,
-        proxy_sc_address,
-        client_sc_address,
+        proto_version: connected_to_proxy.proto_version,
+        proxy_owner_address: connected_to_proxy.proxy_owner_address,
+        proxy_sc_address: connected_to_proxy.proxy_sc_address,
+        client_sc_address: connected_to_proxy.client_sc_address,
         payment_status,
     })
 }
@@ -1609,7 +1833,7 @@ fn authorize_long(
         .root_contract_address
         .as_deref()
         .context("ton.root_contract_address is required for long auth")?;
-    if verbosity.is_interactive() {
+    if verbosity.is_interactive() && params.prompt_for_funding {
         wait_for_long_auth_funding(config)?;
     } else if verbosity.is_verbose() {
         println!(
@@ -1656,7 +1880,9 @@ fn authorize_long(
         .make_request_with_timeout(&request, AUTH_REQUEST_TIMEOUT)
         .context("client.authorizeWithProxyLong")?;
     let auth = cocoon::decode_authorization_with_proxy(&response)?;
-    payment_status_from_auth(&auth, verbosity)
+    let payment_status = payment_status_from_auth(&auth, verbosity)?;
+    ensure_short_auth_secret_hash(config, ton_readonly, params.client_sc_address, verbosity)?;
+    Ok(payment_status)
 }
 
 fn update_payment_status(session: &mut Session<ratls::RatlsStream>) -> Result<AuthPaymentStatus> {
@@ -1672,14 +1898,167 @@ fn update_payment_status(session: &mut Session<ratls::RatlsStream>) -> Result<Au
     ))
 }
 
+fn send_client_control_from_config(
+    config: &RuntimeConfig,
+    client_sc_address: &str,
+    action: TonControlAction,
+) -> Result<TonControlResult> {
+    let mut ton_readonly = TonReadonlyState::new(config);
+    let ton = ton_readonly.snapshot(&config.cocoon_wallet_address, client_sc_address);
+    if !ton.ok {
+        anyhow::bail!(
+            "TON state is unavailable: {}",
+            ton.last_error.as_deref().unwrap_or("unknown error")
+        );
+    }
+    let client_contract = ton
+        .client_contract
+        .as_ref()
+        .context("client contract state is unavailable")?;
+    validate_client_contract_control(client_contract)?;
+    let wallet = ton
+        .wallet
+        .as_ref()
+        .context("Cocoon wallet state is unavailable")?;
+    let wallet_seqno =
+        validate_cocoon_wallet_can_send_control(&config.cocoon_wallet_address, wallet)?;
+    let request = TonControlRequest {
+        action,
+        wallet_owner_address: &config.owner_address,
+        wallet_address: &config.cocoon_wallet_address,
+        wallet_seqno,
+        client_contract_address: client_sc_address,
+        wallet_seed: config.node_wallet_key.seed(),
+    };
+    let prepared = ton_readonly.prepare_client_control(&request)?;
+    ton_readonly.send_prepared_control(&prepared)
+}
+
+fn sweep_cocoon_wallet_from_config(
+    config: &RuntimeConfig,
+    client_sc_address: &str,
+    destination_address: Option<&str>,
+    reserve_nanotons: u64,
+) -> Result<TonWalletTransferResult> {
+    let mut ton_readonly = TonReadonlyState::new(config);
+    let ton = ton_readonly.snapshot(&config.cocoon_wallet_address, client_sc_address);
+    if !ton.ok {
+        anyhow::bail!(
+            "TON state is unavailable: {}",
+            ton.last_error.as_deref().unwrap_or("unknown error")
+        );
+    }
+    let client_contract = ton
+        .client_contract
+        .as_ref()
+        .context("client contract state is unavailable")?;
+    validate_client_contract_closed_for_sweep(client_contract)?;
+    let wallet = ton
+        .wallet
+        .as_ref()
+        .context("Cocoon wallet state is unavailable")?;
+    let (wallet_seqno, amount) =
+        validate_cocoon_wallet_can_sweep(&config.cocoon_wallet_address, wallet, reserve_nanotons)?;
+    let destination_address = destination_address
+        .filter(|address| !address.is_empty())
+        .unwrap_or(&config.owner_address);
+    let request = TonWalletTransferRequest {
+        wallet_owner_address: &config.owner_address,
+        wallet_address: &config.cocoon_wallet_address,
+        wallet_seqno,
+        wallet_seed: config.node_wallet_key.seed(),
+        destination_address,
+        amount,
+    };
+    let prepared = ton_readonly.prepare_wallet_transfer(&request)?;
+    ton_readonly.send_prepared_wallet_transfer(&prepared)
+}
+
+fn ensure_short_auth_secret_hash(
+    config: &RuntimeConfig,
+    ton_readonly: &mut TonReadonlyState,
+    client_sc_address: &str,
+    verbosity: ConnectVerbosity,
+) -> Result<()> {
+    let Some(secret) = config.client_secret.as_deref() else {
+        return Ok(());
+    };
+    let desired_secret_hash = secret_hash_bytes(secret);
+    let mut sent_update = false;
+
+    for attempt in 1..=SECRET_HASH_CONFIRM_ATTEMPTS {
+        let snapshot = ton_readonly.snapshot(&config.cocoon_wallet_address, client_sc_address);
+        if !snapshot.ok {
+            if attempt == SECRET_HASH_CONFIRM_ATTEMPTS {
+                anyhow::bail!(
+                    "short-auth secret hash check failed: {}",
+                    snapshot.last_error.as_deref().unwrap_or("unknown error")
+                );
+            }
+            thread::sleep(SECRET_HASH_CONFIRM_INTERVAL);
+            continue;
+        }
+
+        let client_contract = snapshot
+            .client_contract
+            .as_ref()
+            .context("client contract state is unavailable for short-auth secret update")?;
+        if client_contract.secret_hash == Some(desired_secret_hash) {
+            if sent_update && verbosity.is_interactive() {
+                println!("{} Short auth token installed", color_status("ok"));
+            }
+            return Ok(());
+        }
+
+        if !sent_update {
+            let wallet = snapshot
+                .wallet
+                .as_ref()
+                .context("Cocoon wallet state is unavailable for short-auth secret update")?;
+            validate_client_contract_control(client_contract)?;
+            let wallet_seqno =
+                validate_cocoon_wallet_can_send_control(&config.cocoon_wallet_address, wallet)?;
+            let request = TonClientSecretHashRequest {
+                wallet_owner_address: &config.owner_address,
+                wallet_address: &config.cocoon_wallet_address,
+                wallet_seqno,
+                client_contract_address: client_sc_address,
+                secret_hash: &desired_secret_hash,
+                wallet_seed: config.node_wallet_key.seed(),
+            };
+            let prepared = ton_readonly.prepare_client_secret_hash(&request)?;
+            let result = ton_readonly.send_prepared_client_secret_hash(&prepared)?;
+            if verbosity.is_verbose() {
+                println!(
+                    "client secret hash update sent: wallet={} client_contract={} value={} wallet_seqno={} query_id={} send_status={}",
+                    result.wallet_address,
+                    result.client_contract_address,
+                    result.attached_value,
+                    result.wallet_seqno,
+                    result.query_id,
+                    result.send_status
+                );
+            }
+            sent_update = true;
+        }
+
+        thread::sleep(SECRET_HASH_CONFIRM_INTERVAL);
+    }
+
+    anyhow::bail!("short-auth secret hash update was not confirmed")
+}
+
 fn wait_for_long_auth_funding(config: &RuntimeConfig) -> Result<()> {
     println!(
         "{} Long auth requires a funded Cocoon wallet",
         color_status("info")
     );
     println!("Address: {}", config.cocoon_wallet_address);
-    println!("Deposit 20 TON to this address, then continue.");
-    wait_for_enter("Press Enter after funding: ")?;
+    println!(
+        "Deposit {} to this address, then continue.",
+        color_amount("20 TON")
+    );
+    wait_for_enter("Press Enter after funding...")?;
 
     loop {
         match read_interactive_wallet_balance(config) {
@@ -1773,17 +2152,25 @@ fn format_nanotons(value: u64) -> String {
 
 fn color_status(status: &str) -> &'static str {
     match status {
-        "ok" => "\x1b[32mOK\x1b[0m",
+        "ok" => "\x1b[32m✓\x1b[0m",
         "warn" => "\x1b[33m!\x1b[0m",
         "info" => "\x1b[36m>\x1b[0m",
         _ => "",
     }
 }
 
+fn color_amount(amount: &'static str) -> String {
+    format!("\x1b[1;33m{amount}\x1b[0m")
+}
+
 /// Checks that the configured secret matches the proxy-provided challenge hash.
 fn secret_hash_matches(secret: &str, expected: &[u8; 32]) -> bool {
+    secret_hash_bytes(secret) == *expected
+}
+
+fn secret_hash_bytes(secret: &str) -> [u8; 32] {
     let digest = Sha256::digest(secret.as_bytes());
-    digest.as_slice() == expected
+    digest.into()
 }
 
 const fn tl_long_to_u64(value: i64) -> u64 {
@@ -1933,6 +2320,7 @@ mod tests {
             stake: Some(STAKE),
             tokens_used: Some(0),
             unlock_ts: Some(0),
+            secret_hash: Some([0; 32]),
             withdrawable_balance: Some(withdrawable_balance),
         }
     }

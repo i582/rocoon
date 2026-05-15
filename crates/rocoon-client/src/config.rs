@@ -7,7 +7,6 @@
 //! runs, shells, and service managers without rewriting the config file.
 
 use std::env;
-use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -150,61 +149,35 @@ impl RuntimeConfig {
     /// fails, environment overrides cannot be parsed, or validation rejects the
     /// effective configuration.
     pub fn load() -> Result<Self> {
-        let cli = cli_args_from_args(env::args_os().skip(1))?;
-        let mut config = read_config(&cli.config_path, cli.explicit_config_path)?;
+        Self::load_from_path(PathBuf::from(DEFAULT_CONFIG_PATH), false, false)
+    }
 
-        if let Ok(value) = env::var("COCOON_PROXY_ADDR") {
-            config.network.proxy_addr = value;
-        }
-        if let Ok(value) = env::var("COCOON_CONNECT_TIMEOUT_SECS") {
-            config.network.connect_timeout_secs =
-                value.parse().context("parse COCOON_CONNECT_TIMEOUT_SECS")?;
-        }
-        if let Ok(value) = env::var("ROCOON_LISTEN_ADDR") {
-            config.server.listen_addr = value;
-        }
-        if let Ok(value) = env::var("COCOON_OWNER_ADDRESS") {
-            config.client.owner_address = value;
-        }
-        if let Ok(value) = env::var("COCOON_NODE_WALLET_KEY") {
-            config.client.node_wallet_key = value;
-        }
-        if let Ok(value) = env::var("COCOON_CLIENT_SECRET") {
-            config.client.secret = Some(value);
-        }
-        if let Ok(value) = env::var("COCOON_MIN_CONFIG_VERSION") {
-            config.client.min_config_version =
-                value.parse().context("parse COCOON_MIN_CONFIG_VERSION")?;
-        }
-        if let Ok(value) = env::var("COCOON_MAX_COEFFICIENT") {
-            config.request.max_coefficient =
-                value.parse().context("parse COCOON_MAX_COEFFICIENT")?;
-        }
-        if let Ok(value) = env::var("COCOON_MAX_TOKENS") {
-            config.request.max_tokens = value.parse().context("parse COCOON_MAX_TOKENS")?;
-        }
-        if let Ok(value) = env::var("COCOON_REQUEST_TIMEOUT_SECS") {
-            config.request.timeout_secs =
-                value.parse().context("parse COCOON_REQUEST_TIMEOUT_SECS")?;
-        }
-        if let Ok(value) = env::var("ROCOON_TON_READONLY_ENABLED") {
-            config.ton.readonly_enabled =
-                parse_bool(&value).context("parse ROCOON_TON_READONLY_ENABLED")?;
-        }
-        if let Ok(value) = env::var("ROCOON_TON_MAINNET") {
-            config.ton.mainnet = parse_bool(&value).context("parse ROCOON_TON_MAINNET")?;
-        }
-        if let Ok(value) = env::var("ROCOON_TON_CONFIG_PATH") {
-            config.ton.config_path = Some(PathBuf::from(value));
-        }
-        if let Ok(value) = env::var("COCOON_ROOT_CONTRACT_ADDRESS") {
-            config.ton.root_contract_address = Some(value);
-        }
-        if let Ok(value) = env::var("ROCOON_TON_QUERY_TIMEOUT_MILLIS") {
-            config.ton.query_timeout_millis = value
-                .parse()
-                .context("parse ROCOON_TON_QUERY_TIMEOUT_MILLIS")?;
-        }
+    /// Loads configuration using CLI-selected options.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the config cannot be loaded or validated.
+    pub fn load_cli(config_path: Option<PathBuf>, verbose: bool) -> Result<Self> {
+        let explicit_config_path = config_path.is_some();
+        Self::load_from_path(
+            config_path.unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH)),
+            explicit_config_path,
+            verbose,
+        )
+    }
+
+    /// Loads configuration from a path selected by the CLI.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the config cannot be loaded or validated.
+    pub fn load_from_path(
+        config_path: PathBuf,
+        explicit_config_path: bool,
+        verbose: bool,
+    ) -> Result<Self> {
+        let mut config = read_config(&config_path, explicit_config_path)?;
+        apply_env_overrides(&mut config)?;
         validate(&config)?;
         let owner_address = ton_core::types::TonAddress::from_str(&config.client.owner_address)
             .context("parse client.owner_address as TON address")?;
@@ -229,11 +202,11 @@ impl RuntimeConfig {
         let ton_config_path = config
             .ton
             .config_path
-            .map(|path| resolve_path_relative_to_config(path, &cli.config_path));
+            .map(|path| resolve_path_relative_to_config(path, &config_path));
 
         Ok(Self {
-            config_path: cli.config_path,
-            verbose: cli.verbose,
+            config_path,
+            verbose,
             proxy_addr: config.network.proxy_addr,
             connect_timeout: Duration::from_secs(config.network.connect_timeout_secs),
             listen_addr: config.server.listen_addr,
@@ -308,57 +281,6 @@ impl Default for TonConfig {
     }
 }
 
-/// Parses the minimal command-line interface.
-///
-/// The boolean in the result marks whether the config path was explicitly
-/// provided. That distinction lets default `rocoon.toml` be optional while
-/// still failing fast for mistyped explicit config paths.
-struct CliArgs {
-    config_path: PathBuf,
-    explicit_config_path: bool,
-    verbose: bool,
-}
-
-fn cli_args_from_args<I>(args: I) -> Result<CliArgs>
-where
-    I: Iterator<Item = OsString>,
-{
-    let mut cli = CliArgs {
-        config_path: PathBuf::from(DEFAULT_CONFIG_PATH),
-        explicit_config_path: false,
-        verbose: false,
-    };
-    let mut args = args;
-
-    while let Some(arg) = args.next() {
-        let arg = arg
-            .into_string()
-            .map_err(|_| anyhow!("argument is not valid UTF-8"))?;
-
-        match arg.as_str() {
-            "--config" | "-c" => {
-                if cli.explicit_config_path {
-                    anyhow::bail!("--config was provided more than once");
-                }
-                let path = args
-                    .next()
-                    .ok_or_else(|| anyhow!("missing path after {arg}"))?;
-                cli.config_path = PathBuf::from(path);
-                cli.explicit_config_path = true;
-            }
-            "--verbose" | "-v" => {
-                cli.verbose = true;
-            }
-            "--help" | "-h" => {
-                anyhow::bail!("usage: rocoon [--config path] [--verbose]");
-            }
-            _ => anyhow::bail!("unknown argument: {arg}; use --config path or --verbose"),
-        }
-    }
-
-    Ok(cli)
-}
-
 /// Reads and deserializes the TOML file, or returns defaults when allowed.
 fn read_config(path: &Path, explicit: bool) -> Result<FileConfig> {
     match fs::read_to_string(path) {
@@ -379,6 +301,107 @@ fn resolve_path_relative_to_config(path: PathBuf, config_path: &Path) -> PathBuf
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     config_dir.join(path)
+}
+
+fn apply_env_overrides(config: &mut FileConfig) -> Result<()> {
+    apply_string_env("COCOON_PROXY_ADDR", &mut config.network.proxy_addr)?;
+    apply_u64_env(
+        "ROCOON_CONNECT_TIMEOUT_SECS",
+        &mut config.network.connect_timeout_secs,
+    )?;
+    apply_string_env("ROCOON_LISTEN_ADDR", &mut config.server.listen_addr)?;
+    apply_string_env("COCOON_OWNER_ADDRESS", &mut config.client.owner_address)?;
+    apply_string_env("COCOON_NODE_WALLET_KEY", &mut config.client.node_wallet_key)?;
+    apply_optional_string_env("COCOON_CLIENT_SECRET", &mut config.client.secret)?;
+    apply_i32_env(
+        "COCOON_MIN_CONFIG_VERSION",
+        &mut config.client.min_config_version,
+    )?;
+    apply_i32_env(
+        "ROCOON_MAX_COEFFICIENT",
+        &mut config.request.max_coefficient,
+    )?;
+    apply_i32_env("ROCOON_MAX_TOKENS", &mut config.request.max_tokens)?;
+    apply_f64_env(
+        "ROCOON_REQUEST_TIMEOUT_SECS",
+        &mut config.request.timeout_secs,
+    )?;
+    apply_bool_env(
+        "ROCOON_TON_READONLY_ENABLED",
+        &mut config.ton.readonly_enabled,
+    )?;
+    apply_bool_env("ROCOON_TON_MAINNET", &mut config.ton.mainnet)?;
+    apply_optional_path_env("ROCOON_TON_CONFIG_PATH", &mut config.ton.config_path)?;
+    apply_optional_string_env(
+        "COCOON_ROOT_CONTRACT_ADDRESS",
+        &mut config.ton.root_contract_address,
+    )?;
+    apply_u64_env(
+        "ROCOON_TON_QUERY_TIMEOUT_MILLIS",
+        &mut config.ton.query_timeout_millis,
+    )?;
+    Ok(())
+}
+
+fn read_env(name: &str) -> Result<Option<String>> {
+    match env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(anyhow!(error)).with_context(|| format!("read {name}")),
+    }
+}
+
+fn apply_string_env(name: &str, target: &mut String) -> Result<()> {
+    if let Some(value) = read_env(name)? {
+        *target = value;
+    }
+    Ok(())
+}
+
+fn apply_optional_string_env(name: &str, target: &mut Option<String>) -> Result<()> {
+    if let Some(value) = read_env(name)? {
+        *target = if value.is_empty() { None } else { Some(value) };
+    }
+    Ok(())
+}
+
+fn apply_optional_path_env(name: &str, target: &mut Option<PathBuf>) -> Result<()> {
+    if let Some(value) = read_env(name)? {
+        *target = if value.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(value))
+        };
+    }
+    Ok(())
+}
+
+fn apply_bool_env(name: &str, target: &mut bool) -> Result<()> {
+    if let Some(value) = read_env(name)? {
+        *target = parse_bool(&value).with_context(|| format!("parse {name}"))?;
+    }
+    Ok(())
+}
+
+fn apply_i32_env(name: &str, target: &mut i32) -> Result<()> {
+    if let Some(value) = read_env(name)? {
+        *target = value.parse().with_context(|| format!("parse {name}"))?;
+    }
+    Ok(())
+}
+
+fn apply_u64_env(name: &str, target: &mut u64) -> Result<()> {
+    if let Some(value) = read_env(name)? {
+        *target = value.parse().with_context(|| format!("parse {name}"))?;
+    }
+    Ok(())
+}
+
+fn apply_f64_env(name: &str, target: &mut f64) -> Result<()> {
+    if let Some(value) = read_env(name)? {
+        *target = value.parse().with_context(|| format!("parse {name}"))?;
+    }
+    Ok(())
 }
 
 /// Parses environment booleans accepted by common service managers and shells.

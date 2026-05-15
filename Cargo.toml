@@ -46,6 +46,7 @@ rocoon-transport = { path = "crates/rocoon-transport" }
 anyhow = "1"
 async-openai = { version = "0.38", default-features = false, features = ["chat-completion-types", "model-types"] }
 base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
 ed25519-dalek = "2.2"
 rand = "0.8"
 rcgen = { version = "0.13", features = ["crypto", "pem"] }
@@ -75,5 +76,6 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
+clap.workspace = true
 rocoon-client = { workspace = true }
 rocoon-openai-server = { workspace = true }
