@@ -14,7 +14,7 @@ use std::thread;
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 
-use crate::client::{CocoonClient, HttpExchange};
+use crate::client::{CocoonClient, CompletionRun, HttpExchange, HttpStreamEvent};
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
@@ -44,6 +44,7 @@ struct CompletionRequest {
     max_coefficient: i32,
     max_tokens: i32,
     timeout: f64,
+    stream: bool,
 }
 
 /// Serves the local OpenAI-compatible API forever.
@@ -125,22 +126,45 @@ fn handle_connection(
         ("POST", "/v1/chat/completions" | "/v1/completions") => {
             let completion = parse_completion_request(&request.body, defaults)
                 .map_err(|error| HttpError::new(stream.try_clone().ok(), 400, &error))?;
-            let response = client
-                .lock()
-                .map_err(|_| {
+            eprintln!(
+                "[rocoon][http] completion path={path} model={} stream={} body_len={} max_coefficient={} max_tokens={} timeout={:.3}",
+                completion.model,
+                completion.stream,
+                completion.body.len(),
+                completion.max_coefficient,
+                completion.max_tokens,
+                completion.timeout,
+            );
+            if completion.stream {
+                let mut client = client.lock().map_err(|_| {
                     HttpError::message(stream.try_clone().ok(), 500, "Cocoon client mutex poisoned")
-                })?
-                .run_chat_completion(
-                    &completion.model,
-                    path,
-                    &completion.body,
-                    completion.max_coefficient,
-                    completion.max_tokens,
-                    completion.timeout,
-                )
-                .map_err(|error| HttpError::new(stream.try_clone().ok(), 502, &error))?;
-            write_cocoon_http_response(&mut stream, response)
-                .map_err(|error| HttpError::new(None, 500, &error))
+                })?;
+                write_streaming_chat_completion(&mut stream, &mut client, path, &completion)
+            } else {
+                let response = {
+                    let request = CompletionRun {
+                        model: &completion.model,
+                        path,
+                        body: &completion.body,
+                        max_coefficient: completion.max_coefficient,
+                        max_tokens: completion.max_tokens,
+                        timeout: completion.timeout,
+                    };
+                    client
+                        .lock()
+                        .map_err(|_| {
+                            HttpError::message(
+                                stream.try_clone().ok(),
+                                500,
+                                "Cocoon client mutex poisoned",
+                            )
+                        })?
+                        .run_chat_completion(&request)
+                        .map_err(|error| HttpError::new(stream.try_clone().ok(), 502, &error))?
+                };
+                write_cocoon_http_response(&mut stream, response)
+                    .map_err(|error| HttpError::new(None, 500, &error))
+            }
         }
         _ => write_json(
             &mut stream,
@@ -150,6 +174,56 @@ fn handle_connection(
         )
         .map_err(|error| HttpError::new(None, 500, &error)),
     }
+}
+
+/// Runs a streaming completion and writes upstream chunks immediately.
+fn write_streaming_chat_completion(
+    stream: &mut TcpStream,
+    client: &mut CocoonClient,
+    path: &str,
+    completion: &CompletionRequest,
+) -> std::result::Result<(), HttpError> {
+    eprintln!("[rocoon][http] local stream requested; forwarding Cocoon request with stream=true");
+    let request = CompletionRun {
+        model: &completion.model,
+        path,
+        body: &completion.body,
+        max_coefficient: completion.max_coefficient,
+        max_tokens: completion.max_tokens,
+        timeout: completion.timeout,
+    };
+
+    let mut wrote_head = false;
+    let result = client.run_chat_completion_stream(&request, |event| {
+        match event {
+            HttpStreamEvent::ResponseHead(head) => {
+                wrote_head = true;
+                write_streaming_response_head(
+                    stream,
+                    head.status_code,
+                    &head.reason,
+                    sanitized_response_headers(head.headers),
+                )?;
+            }
+            HttpStreamEvent::PayloadPart(data) => {
+                stream
+                    .write_all(data)
+                    .context("write streamed Cocoon payload part")?;
+                stream
+                    .flush()
+                    .context("flush streamed Cocoon payload part")?;
+            }
+        }
+        Ok(())
+    });
+    result.map_err(|error| {
+        let error_stream = if wrote_head {
+            None
+        } else {
+            stream.try_clone().ok()
+        };
+        HttpError::new(error_stream, 502, &error)
+    })
 }
 
 /// HTTP error carrying enough context to respond on the original stream.
@@ -306,11 +380,14 @@ fn parse_completion_request(body: &[u8], defaults: Defaults) -> Result<Completio
         object.insert("max_tokens".to_string(), Value::from(max_tokens));
         object.insert("max_completion_tokens".to_string(), Value::from(max_tokens));
     }
-    if object
+    let streaming_alias = object.remove("streaming").and_then(|value| value.as_bool());
+    let stream = object
         .get("stream")
         .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
+        .or(streaming_alias)
+        .unwrap_or(false);
+    object.insert("stream".to_string(), Value::from(stream));
+    if stream {
         let stream_options = object
             .entry("stream_options")
             .or_insert_with(|| Value::Object(Map::default()));
@@ -327,6 +404,7 @@ fn parse_completion_request(body: &[u8], defaults: Defaults) -> Result<Completio
         max_coefficient,
         max_tokens,
         timeout,
+        stream,
     })
 }
 
@@ -372,6 +450,29 @@ fn write_response(
     headers: Vec<(String, String)>,
     body: &[u8],
 ) -> Result<()> {
+    write_response_head(stream, status_code, reason, headers, Some(body.len()))?;
+    stream.write_all(body).context("write response body")?;
+    stream.flush().context("flush response")
+}
+
+/// Writes an HTTP/1.1 response head without a fixed body length.
+fn write_streaming_response_head(
+    stream: &mut TcpStream,
+    status_code: i32,
+    reason: &str,
+    headers: Vec<(String, String)>,
+) -> Result<()> {
+    write_response_head(stream, status_code, reason, headers, None)
+}
+
+/// Writes a generated HTTP status line and normalized headers.
+fn write_response_head(
+    stream: &mut TcpStream,
+    status_code: i32,
+    reason: &str,
+    headers: Vec<(String, String)>,
+    content_length: Option<usize>,
+) -> Result<()> {
     let mut normalized = HashMap::<String, String>::new();
     for (name, value) in headers {
         normalized.insert(name.to_ascii_lowercase(), value);
@@ -379,7 +480,11 @@ fn write_response(
     normalized
         .entry("content-type".to_string())
         .or_insert_with(|| "application/json".to_string());
-    normalized.insert("content-length".to_string(), body.len().to_string());
+    if let Some(content_length) = content_length {
+        normalized.insert("content-length".to_string(), content_length.to_string());
+    } else {
+        normalized.remove("content-length");
+    }
     normalized.insert("connection".to_string(), "close".to_string());
 
     write!(stream, "HTTP/1.1 {status_code} {reason}\r\n").context("write status line")?;
@@ -388,8 +493,7 @@ fn write_response(
             .context("write response header")?;
     }
     write!(stream, "\r\n").context("write response header terminator")?;
-    stream.write_all(body).context("write response body")?;
-    stream.flush().context("flush response")
+    stream.flush().context("flush response head")
 }
 
 /// Removes hop-by-hop and Cocoon-internal response headers.

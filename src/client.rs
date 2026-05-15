@@ -12,9 +12,10 @@ use sha2::{Digest, Sha256};
 
 use crate::cocoon::{self, RunQueryOptions, WorkerInstanceV2, WorkerTypeV2};
 use crate::config::RuntimeConfig;
+use crate::debug_log::{escaped_preview, headers_summary};
 use crate::pow;
 use crate::ratls;
-use crate::session::{RunQueryOutput, Session};
+use crate::session::{RunQueryEvent, RunQueryOutput, Session};
 
 /// Authenticated Cocoon proxy client.
 ///
@@ -59,6 +60,40 @@ pub struct HttpExchange {
     pub headers: Vec<(String, String)>,
     /// Full response body assembled from head and streamed parts.
     pub payload: Vec<u8>,
+}
+
+/// Parameters for one Cocoon-backed completion request.
+pub struct CompletionRun<'a> {
+    /// Model name used by Cocoon to select worker type.
+    pub model: &'a str,
+    /// OpenAI-compatible path forwarded inside Cocoon's HTTP wrapper.
+    pub path: &'a str,
+    /// Sanitized JSON body forwarded to the worker.
+    pub body: &'a [u8],
+    /// Maximum accepted Cocoon worker price coefficient.
+    pub max_coefficient: i32,
+    /// Maximum tokens the worker may spend for this request.
+    pub max_tokens: i32,
+    /// Cocoon request timeout in seconds.
+    pub timeout: f64,
+}
+
+/// HTTP response metadata returned before a streamed Cocoon response body.
+pub struct HttpResponseHead {
+    /// Upstream HTTP status code.
+    pub status_code: i32,
+    /// Upstream HTTP reason phrase.
+    pub reason: String,
+    /// Upstream headers after TL decoding.
+    pub headers: Vec<(String, String)>,
+}
+
+/// One HTTP-level streaming event decoded from Cocoon answer packets.
+pub enum HttpStreamEvent<'a> {
+    /// Upstream HTTP status line and headers from the first answer packet.
+    ResponseHead(HttpResponseHead),
+    /// Upstream response body bytes from the head payload or later part packets.
+    PayloadPart(&'a [u8]),
 }
 
 impl CocoonClient {
@@ -140,28 +175,26 @@ impl CocoonClient {
     /// `body` is already sanitized JSON from the local HTTP layer. The method
     /// wraps it into Cocoon's internal `http.request`, sends `client.runQueryEx`,
     /// gathers all answer parts, and decodes Cocoon's `http.response`.
-    pub fn run_chat_completion(
-        &mut self,
-        model: &str,
-        path: &str,
-        body: &[u8],
-        max_coefficient: i32,
-        max_tokens: i32,
-        timeout: f64,
-    ) -> Result<HttpExchange> {
-        let mut options = self.request_options;
-        options.max_coefficient = max_coefficient;
-        options.max_tokens = max_tokens;
-        options.timeout = timeout * 0.95;
-        // C++ sets flag bit 1 for proto >= 3 even when the request is not
-        // encrypted. The zero key preserves that wire shape.
-        options.public_key = (self.proto_version >= 3).then_some([0u8; 32]);
+    pub fn run_chat_completion(&mut self, request: &CompletionRun<'_>) -> Result<HttpExchange> {
+        let options =
+            self.query_options(request.max_coefficient, request.max_tokens, request.timeout);
 
-        let headers = json_request_headers(body.len());
-        let http_request = cocoon::encode_http_request("POST", path, &headers, body);
+        let headers = json_request_headers(request.body.len());
+        let http_request =
+            cocoon::encode_http_request("POST", request.path, &headers, request.body);
+        eprintln!(
+            "[rocoon][completion] send model={} path={} body_len={} max_coefficient={} max_tokens={} timeout={:.3} body_preview=\"{}\"",
+            request.model,
+            request.path,
+            request.body.len(),
+            request.max_coefficient,
+            request.max_tokens,
+            request.timeout,
+            escaped_preview(request.body),
+        );
         let output = match self
             .session
-            .run_client_query_ex(model, &http_request, options)
+            .run_client_query_ex(request.model, &http_request, options)
         {
             Ok(output) => output,
             Err(error) => {
@@ -175,12 +208,107 @@ impl CocoonClient {
         http_exchange_from_output(output)
     }
 
+    /// Runs a completion request and forwards Cocoon body parts as they arrive.
+    pub fn run_chat_completion_stream<F>(
+        &mut self,
+        request: &CompletionRun<'_>,
+        mut on_event: F,
+    ) -> Result<()>
+    where
+        F: for<'a> FnMut(HttpStreamEvent<'a>) -> Result<()>,
+    {
+        let options =
+            self.query_options(request.max_coefficient, request.max_tokens, request.timeout);
+        let headers = json_request_headers(request.body.len());
+        let http_request =
+            cocoon::encode_http_request("POST", request.path, &headers, request.body);
+        log_completion_request(request);
+
+        let result = self.session.run_client_query_ex_stream(
+            request.model,
+            &http_request,
+            options,
+            |event| {
+                match event {
+                    RunQueryEvent::ResponseHead(data) => {
+                        forward_response_head(data, &mut on_event)?;
+                    }
+                    RunQueryEvent::PayloadPart(data) => {
+                        on_event(HttpStreamEvent::PayloadPart(data))?;
+                    }
+                }
+                Ok(())
+            },
+        );
+        if let Err(error) = result {
+            eprintln!("client.runQueryEx stream failed, reconnecting for next request: {error:#}");
+            if let Err(reconnect_error) = self.reconnect() {
+                eprintln!(
+                    "reconnect after streaming runQueryEx failure failed: {reconnect_error:#}"
+                );
+            }
+            return Err(error).context("client.runQueryEx stream");
+        }
+        Ok(())
+    }
+
+    /// Builds `client.runQueryEx` options for one completion request.
+    fn query_options(
+        &self,
+        max_coefficient: i32,
+        max_tokens: i32,
+        timeout: f64,
+    ) -> RunQueryOptions {
+        let mut options = self.request_options;
+        options.max_coefficient = max_coefficient;
+        options.max_tokens = max_tokens;
+        options.timeout = timeout * 0.95;
+        // C++ sets flag bit 1 for proto >= 3 even when the request is not
+        // encrypted. The zero key preserves that wire shape.
+        options.public_key = (self.proto_version >= 3).then_some([0u8; 32]);
+        options
+    }
+
     /// Replaces the current live session with a fresh authorized connection.
     fn reconnect(&mut self) -> Result<()> {
         let replacement = Self::connect(&self.config)?;
         *self = replacement;
         Ok(())
     }
+}
+
+fn log_completion_request(request: &CompletionRun<'_>) {
+    eprintln!(
+        "[rocoon][completion] send model={} path={} body_len={} max_coefficient={} max_tokens={} timeout={:.3} body_preview=\"{}\"",
+        request.model,
+        request.path,
+        request.body.len(),
+        request.max_coefficient,
+        request.max_tokens,
+        request.timeout,
+        escaped_preview(request.body),
+    );
+}
+
+fn forward_response_head<F>(data: &[u8], on_event: &mut F) -> Result<()>
+where
+    F: for<'a> FnMut(HttpStreamEvent<'a>) -> Result<()>,
+{
+    let response = cocoon::decode_http_response(data)?;
+    let head = http_response_head_from_response(&response)?;
+    eprintln!(
+        "[rocoon][http.stream.response] status={} reason=\"{}\" headers=\"{}\" head_payload_len={} head_payload_preview=\"{}\"",
+        head.status_code,
+        head.reason,
+        headers_summary(&head.headers),
+        response.payload.len(),
+        escaped_preview(response.payload),
+    );
+    on_event(HttpStreamEvent::ResponseHead(head))?;
+    if !response.payload.is_empty() {
+        on_event(HttpStreamEvent::PayloadPart(response.payload))?;
+    }
+    Ok(())
 }
 
 /// Minimal HTTP headers required by Cocoon's internal HTTP request wrapper.
@@ -265,12 +393,37 @@ fn print_authorization_result(auth: &cocoon::AuthorizationWithProxy<'_>) -> Resu
 /// `client.queryAnswerPartEx` packets carry additional response body bytes.
 fn http_exchange_from_output(output: RunQueryOutput) -> Result<HttpExchange> {
     let response = cocoon::decode_http_response(&output.response_head)?;
+    let head = http_response_head_from_response(&response)?;
+    let part_count = output.payload_parts.len();
+    let part_bytes = output.payload_parts.iter().map(Vec::len).sum::<usize>();
+    eprintln!(
+        "[rocoon][http.response] status={} reason=\"{}\" headers=\"{}\" head_payload_len={} part_count={} part_bytes={} head_payload_preview=\"{}\"",
+        head.status_code,
+        head.reason,
+        headers_summary(&head.headers),
+        response.payload.len(),
+        part_count,
+        part_bytes,
+        escaped_preview(response.payload),
+    );
     let mut payload = response.payload.to_vec();
     for part in output.payload_parts {
         payload.extend(part);
     }
 
     Ok(HttpExchange {
+        status_code: head.status_code,
+        reason: head.reason,
+        headers: head.headers,
+        payload,
+    })
+}
+
+/// Converts a decoded Cocoon `http.response` into owned response metadata.
+fn http_response_head_from_response(
+    response: &cocoon::HttpResponse<'_>,
+) -> Result<HttpResponseHead> {
+    Ok(HttpResponseHead {
         status_code: response.status_code,
         reason: utf8(response.reason)?.to_string(),
         headers: response
@@ -283,7 +436,6 @@ fn http_exchange_from_output(output: RunQueryOutput) -> Result<HttpExchange> {
                 ))
             })
             .collect::<Result<_>>()?,
-        payload,
     })
 }
 

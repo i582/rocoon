@@ -1,6 +1,7 @@
 mod client;
 mod cocoon;
 mod config;
+mod debug_log;
 mod pow;
 mod ratls;
 mod server;

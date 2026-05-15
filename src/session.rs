@@ -13,6 +13,7 @@ use rand::RngCore;
 use tl_proto::{TlRead, TlWrite};
 
 use crate::cocoon::{self, RunQueryOptions};
+use crate::debug_log::{escaped_preview, short_request_id};
 
 const MAX_FRAME_SIZE: u32 = 1 << 20;
 
@@ -97,6 +98,14 @@ pub struct RunQueryOutput {
     pub payload_parts: Vec<Vec<u8>>,
 }
 
+/// One streamed `client.runQueryEx` event from Cocoon.
+pub enum RunQueryEvent<'a> {
+    /// First packet containing the encoded HTTP response head.
+    ResponseHead(&'a [u8]),
+    /// Additional body bytes from a subsequent answer part packet.
+    PayloadPart(&'a [u8]),
+}
+
 impl<RW: Read + Write> Session<RW> {
     /// Starts a logical Cocoon session over the supplied transport.
     pub fn connect(io: RW) -> Result<(Self, TcpConnected)> {
@@ -176,88 +185,104 @@ impl<RW: Read + Write> Session<RW> {
         http_request_payload: &[u8],
         options: RunQueryOptions,
     ) -> Result<RunQueryOutput> {
+        let mut response_head = None;
+        let mut payload_parts = Vec::new();
+
+        self.run_client_query_ex_stream(model, http_request_payload, options, |event| {
+            match event {
+                RunQueryEvent::ResponseHead(data) => {
+                    response_head = Some(data.to_vec());
+                }
+                RunQueryEvent::PayloadPart(data) => {
+                    payload_parts.push(data.to_vec());
+                }
+            }
+            Ok(())
+        })?;
+
+        let response_head = response_head.context("missing client.queryAnswerEx")?;
+        Ok(RunQueryOutput {
+            response_head,
+            payload_parts,
+        })
+    }
+
+    /// Sends `client.runQueryEx` and forwards answer packets as they arrive.
+    ///
+    /// Callers receive the first encoded HTTP response head and every
+    /// subsequent payload chunk before this method reads the next frame.
+    pub fn run_client_query_ex_stream<F>(
+        &mut self,
+        model: &str,
+        http_request_payload: &[u8],
+        options: RunQueryOptions,
+        mut on_event: F,
+    ) -> Result<()>
+    where
+        F: for<'a> FnMut(RunQueryEvent<'a>) -> Result<()>,
+    {
         let mut request_id = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut request_id);
 
         let request =
             cocoon::encode_run_query_ex(model, http_request_payload, &request_id, options);
         let packet = tl_proto::serialize(TcpPacketOut { data: &request });
+        let request_id_log = short_request_id(&request_id);
+        eprintln!(
+            "[rocoon][runQueryEx:{request_id_log}] send model={model} http_request_len={} max_coefficient={} max_tokens={} timeout={:.3}",
+            http_request_payload.len(),
+            options.max_coefficient,
+            options.max_tokens,
+            options.timeout,
+        );
         self.send_frame(&packet)
             .context("send client.runQueryEx tcp.packet")?;
 
-        let mut response_head = None;
-        let mut payload_parts = Vec::new();
+        let mut seen_response_head = false;
 
         loop {
             let payload = self.recv_frame().context("receive tcp.packet response")?;
             let packet = tl_proto::deserialize::<TcpPacket>(&payload)
                 .context("decode tcp packet while waiting for client.runQueryEx")?;
-
-            match packet {
-                TcpPacket::Packet { data } => {
-                    let Ok(answer) = cocoon::decode_query_answer_ex(data) else {
-                        continue;
-                    };
-                    match answer {
-                        cocoon::QueryAnswerEx::Answer {
-                            request_id: got_id,
-                            answer,
-                            final_info,
-                            ..
-                        } if got_id == &request_id => {
-                            if response_head.is_some() {
-                                anyhow::bail!("duplicate client.queryAnswerEx");
-                            }
-                            let answer = answer.to_vec();
-                            if final_info.is_some() {
-                                return Ok(RunQueryOutput {
-                                    response_head: answer,
-                                    payload_parts,
-                                });
-                            }
-                            response_head = Some(answer);
-                        }
-                        cocoon::QueryAnswerEx::Part {
-                            request_id: got_id,
-                            answer,
-                            final_info,
-                            ..
-                        } if got_id == &request_id => {
-                            if response_head.is_none() {
-                                anyhow::bail!(
-                                    "received client.queryAnswerPartEx before response head"
-                                );
-                            }
-                            payload_parts.push(answer.to_vec());
-                            if final_info.is_some() {
-                                let response_head =
-                                    response_head.context("missing client.queryAnswerEx")?;
-                                return Ok(RunQueryOutput {
-                                    response_head,
-                                    payload_parts,
-                                });
-                            }
-                        }
-                        cocoon::QueryAnswerEx::Error {
-                            request_id: got_id,
-                            error_code,
-                            error,
-                            ..
-                        } if got_id == &request_id => {
-                            let error = std::str::from_utf8(error).unwrap_or("<non-utf8>");
-                            anyhow::bail!("client.queryAnswerErrorEx code={error_code}: {error}");
-                        }
-                        _ => {}
-                    }
-                }
-                TcpPacket::Ping { id } => {
-                    let pong = tl_proto::serialize(TcpPong { id });
-                    self.send_frame(&pong).context("send tcp.pong")?;
-                }
-                TcpPacket::Pong { .. }
-                | TcpPacket::QueryAnswer { .. }
-                | TcpPacket::QueryError { .. } => {}
+            if self.handle_run_query_packet(
+                &packet,
+                &request_id,
+                &request_id_log,
+                &mut seen_response_head,
+                &mut on_event,
+            )? {
+                return Ok(());
             }
+        }
+    }
+
+    fn handle_run_query_packet<F>(
+        &mut self,
+        packet: &TcpPacket<'_>,
+        request_id: &[u8; 32],
+        request_id_log: &str,
+        seen_response_head: &mut bool,
+        on_event: &mut F,
+    ) -> Result<bool>
+    where
+        F: for<'a> FnMut(RunQueryEvent<'a>) -> Result<()>,
+    {
+        match packet {
+            TcpPacket::Packet { data } => handle_run_query_answer(
+                data,
+                request_id,
+                request_id_log,
+                seen_response_head,
+                on_event,
+            ),
+            TcpPacket::Ping { id } => {
+                let pong = tl_proto::serialize(TcpPong { id: *id });
+                self.send_frame(&pong).context("send tcp.pong")?;
+                Ok(false)
+            }
+            TcpPacket::Pong { .. }
+            | TcpPacket::QueryAnswer { .. }
+            | TcpPacket::QueryError { .. } => Ok(false),
         }
     }
 
@@ -308,4 +333,110 @@ impl<RW: Read + Write> Session<RW> {
             .context("read frame payload")?;
         Ok(payload)
     }
+}
+
+fn handle_run_query_answer<F>(
+    data: &[u8],
+    request_id: &[u8; 32],
+    request_id_log: &str,
+    seen_response_head: &mut bool,
+    on_event: &mut F,
+) -> Result<bool>
+where
+    F: for<'a> FnMut(RunQueryEvent<'a>) -> Result<()>,
+{
+    let Ok(answer) = cocoon::decode_query_answer_ex(data) else {
+        eprintln!(
+            "[rocoon][runQueryEx:{request_id_log}] ignored tcp.packet data_len={} decode=not_query_answer preview=\"{}\"",
+            data.len(),
+            escaped_preview(data),
+        );
+        return Ok(false);
+    };
+    match answer {
+        cocoon::QueryAnswerEx::Answer {
+            request_id: got_id,
+            answer,
+            final_info,
+            ..
+        } if got_id == request_id => {
+            if *seen_response_head {
+                anyhow::bail!("duplicate client.queryAnswerEx");
+            }
+            *seen_response_head = true;
+            log_query_answer(
+                "client.queryAnswerEx",
+                request_id_log,
+                answer,
+                final_info.as_ref(),
+            );
+            on_event(RunQueryEvent::ResponseHead(answer)).context("handle client.queryAnswerEx")?;
+            Ok(final_info.is_some())
+        }
+        cocoon::QueryAnswerEx::Part {
+            request_id: got_id,
+            answer,
+            final_info,
+            ..
+        } if got_id == request_id => {
+            if !*seen_response_head {
+                anyhow::bail!("received client.queryAnswerPartEx before response head");
+            }
+            log_query_answer(
+                "client.queryAnswerPartEx",
+                request_id_log,
+                answer,
+                final_info.as_ref(),
+            );
+            on_event(RunQueryEvent::PayloadPart(answer))
+                .context("handle client.queryAnswerPartEx")?;
+            Ok(final_info.is_some())
+        }
+        cocoon::QueryAnswerEx::Error {
+            request_id: got_id,
+            error_code,
+            error,
+            final_info,
+            ..
+        } if got_id == request_id => {
+            let error = std::str::from_utf8(error).unwrap_or("<non-utf8>");
+            log_final_info(
+                "client.queryAnswerErrorEx",
+                request_id_log,
+                final_info.as_ref(),
+            );
+            anyhow::bail!("client.queryAnswerErrorEx code={error_code}: {error}");
+        }
+        _ => Ok(false),
+    }
+}
+
+fn log_query_answer(
+    kind: &str,
+    request_id: &str,
+    answer: &[u8],
+    final_info: Option<&cocoon::QueryFinalInfo<'_>>,
+) {
+    eprintln!(
+        "[rocoon][runQueryEx:{request_id}] recv {kind} answer_len={} final={} preview=\"{}\"",
+        answer.len(),
+        final_info.is_some(),
+        escaped_preview(answer),
+    );
+    log_final_info(kind, request_id, final_info);
+}
+
+fn log_final_info(kind: &str, request_id: &str, final_info: Option<&cocoon::QueryFinalInfo<'_>>) {
+    let Some(final_info) = final_info else {
+        return;
+    };
+    let tokens = final_info.tokens_used;
+    eprintln!(
+        "[rocoon][runQueryEx:{request_id}] {kind} final_info prompt={} cached={} completion={} reasoning={} total={}",
+        tokens.prompt_tokens_used,
+        tokens.cached_tokens_used,
+        tokens.completion_tokens_used,
+        tokens.reasoning_tokens_used,
+        tokens.total_tokens_used,
+    );
 }

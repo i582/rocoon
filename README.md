@@ -14,14 +14,15 @@ Current scope:
 - Serve OpenAI-compatible HTTP on `127.0.0.1:9999`.
 - Implement `/v1/models` through `client.getWorkerTypesV2`.
 - Implement `/v1/chat/completions` and `/v1/completions` through `client.runQueryEx`.
-- Collect streamed Cocoon answer parts before returning the local HTTP response.
+- Collect streamed Cocoon answer parts for non-streaming local responses.
+- Serve local OpenAI-compatible SSE for `stream: true` requests.
 
 Not implemented yet:
 
 - TON root contract reading.
 - Cocoon wallet deploy/top-up/register.
 - RA-TLS/TEE quote verification.
-- True local HTTP streaming; streamed Cocoon chunks are aggregated before the local response is sent.
+- True upstream SSE forwarding; current Cocoon workers return an empty SSE body for upstream `stream: true`, so `rocoon` converts a non-streaming Cocoon response into local SSE.
 
 Run:
 
