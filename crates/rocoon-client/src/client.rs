@@ -230,6 +230,7 @@ impl CocoonClient {
                 max_coefficient: config.max_coefficient,
                 max_tokens: config.max_tokens,
                 timeout: config.request_timeout * 0.95,
+                enable_debug: false,
                 min_config_version: config.min_config_version,
                 public_key: None,
             },
@@ -1406,7 +1407,7 @@ fn authorize(
 
     let proxy_public_key = *connected_to_proxy.params.proxy_public_key;
     let payment_status = match connected_to_proxy.auth {
-        cocoon::ProxyAuth::Short { secret_hash, nonce } => {
+        cocoon::ProxyConnectionAuth::Short { secret_hash, nonce } => {
             if let Some(secret) = config.client_secret.as_deref()
                 && secret_hash_matches(secret, secret_hash)
             {
@@ -1424,7 +1425,7 @@ fn authorize(
                 )?
             }
         }
-        cocoon::ProxyAuth::Long { nonce } => authorize_long(
+        cocoon::ProxyConnectionAuth::Long { nonce } => authorize_long(
             session,
             config,
             ton_readonly,

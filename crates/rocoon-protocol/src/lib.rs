@@ -36,6 +36,8 @@ pub struct RunQueryOptions {
     pub max_tokens: i32,
     /// Worker timeout in seconds.
     pub timeout: f64,
+    /// Whether the proxy should attach debug fields to final query info.
+    pub enable_debug: bool,
     /// Minimum accepted on-chain Cocoon config version.
     pub min_config_version: i32,
     /// Optional receiver public key for encrypted requests in proto >= 3.
@@ -104,6 +106,13 @@ struct ClientAuthorizeWithProxyShort<'a> {
 }
 
 /// TL request sent after on-chain long authorization registration.
+///
+/// Source TL:
+///
+/// ```tl
+/// client.authorizeWithProxyLong
+///     = client.AuthorizationWithProxy;
+/// ```
 #[derive(Debug, TlWrite)]
 #[tl(boxed, id = 0xd3474303)]
 struct ClientAuthorizeWithProxyLong;
@@ -192,7 +201,7 @@ struct HttpRequest<'a> {
 #[derive(Debug, TlWrite)]
 #[tl(boxed, id = 0xf54c_b74b)]
 struct ClientRunQueryEx<'a> {
-    model: &'a [u8],
+    model_name: &'a [u8],
     query: &'a [u8],
     max_coefficient: i32,
     max_tokens: i32,
@@ -203,7 +212,7 @@ struct ClientRunQueryEx<'a> {
     #[tl(flags)]
     _flags: (),
     #[tl(flags_bit = 0)]
-    encrypt: Option<bool>,
+    enable_debug: Option<bool>,
     #[tl(flags_bit = 1)]
     public_key: Option<&'a [u8; 32]>,
 }
@@ -256,7 +265,7 @@ pub struct HttpResponse<'tl> {
 pub struct ConnectedToProxy<'tl> {
     pub params: ProxyParams<'tl>,
     pub client_sc_address: &'tl [u8],
-    pub auth: ProxyAuth<'tl>,
+    pub auth: ProxyConnectionAuth<'tl>,
     pub signed_payment: SignedPayment<'tl>,
 }
 
@@ -304,7 +313,7 @@ pub struct ProxyParams<'tl> {
 /// ```
 #[derive(Debug, TlRead)]
 #[tl(boxed)]
-pub enum ProxyAuth<'tl> {
+pub enum ProxyConnectionAuth<'tl> {
     /// Existing registered client can authorize with a shared secret.
     #[tl(id = 0xd6ffc5af)]
     Short {
@@ -466,7 +475,7 @@ pub struct QueryFinalInfo<'tl> {
     #[tl(flags)]
     #[doc(hidden)]
     pub flags: (),
-    pub tokens_used: TokensUsedTl,
+    pub tokens_used: TokensUsed,
     #[tl(flags_bit = 0)]
     pub worker_debug: Option<&'tl [u8]>,
     #[tl(flags_bit = 0)]
@@ -495,8 +504,7 @@ pub struct QueryFinalInfo<'tl> {
 ///     = TokensUsed;
 /// ```
 #[derive(Debug, Clone, Copy, TlRead)]
-#[allow(clippy::struct_field_names)]
-pub struct TokensUsedTl {
+pub struct TokensUsed {
     pub prompt_tokens_used: i64,
     pub cached_tokens_used: i64,
     pub completion_tokens_used: i64,
@@ -645,7 +653,7 @@ pub fn encode_run_query_ex(
     options: RunQueryOptions,
 ) -> Vec<u8> {
     tl_proto::serialize(ClientRunQueryEx {
-        model: model.as_bytes(),
+        model_name: model.as_bytes(),
         query,
         max_coefficient: options.max_coefficient,
         max_tokens: options.max_tokens,
@@ -653,7 +661,7 @@ pub fn encode_run_query_ex(
         request_id,
         min_config_version: options.min_config_version,
         _flags: (),
-        encrypt: Some(false),
+        enable_debug: Some(options.enable_debug),
         public_key: options.public_key.as_ref(),
     })
 }
