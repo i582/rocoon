@@ -443,14 +443,18 @@ impl CocoonClient {
         if now >= self.next_balance_check_at {
             self.next_balance_check_at =
                 now + random_interval(BALANCE_CHECK_MIN_SECS, BALANCE_CHECK_MAX_SECS);
-            if let Err(error) = self.update_balances_and_check() {
+            if let Err(error) = self.update_balances_and_check()
+                && self.verbosity.is_verbose()
+            {
                 eprintln!("balance check failed: {error:#}");
             }
         }
         if now >= self.next_payment_compare_at {
             self.next_payment_compare_at =
                 now + random_interval(PAYMENT_COMPARE_MIN_SECS, PAYMENT_COMPARE_MAX_SECS);
-            if let Err(error) = self.refresh_payment_status() {
+            if let Err(error) = self.refresh_payment_status()
+                && self.verbosity.is_verbose()
+            {
                 eprintln!("payment compare failed: {error:#}");
             }
         }
@@ -1135,7 +1139,6 @@ impl TonReadonlyState {
         match self {
             Self::Disabled => TonReadonlySnapshot::disabled(),
             Self::Failed { config, error } => {
-                eprintln!("TON liteclient is unavailable, reconnecting: {error}");
                 let config = config.clone();
                 match TonReadonlyClient::connect(&config) {
                     Ok(client) => {
@@ -1150,24 +1153,21 @@ impl TonReadonlyState {
             Self::Ready { config, client } => {
                 match client.accounts_snapshot(wallet_address, Some(client_contract_address)) {
                     Ok(snapshot) => snapshot,
-                    Err(first_error) => {
-                        eprintln!("TON snapshot failed, reconnecting liteclient: {first_error:#}");
-                        match TonReadonlyClient::connect(config) {
-                            Ok(replacement) => {
-                                *client = replacement;
-                                client
+                    Err(first_error) => match TonReadonlyClient::connect(config) {
+                        Ok(replacement) => {
+                            *client = replacement;
+                            client
                                     .accounts_snapshot(wallet_address, Some(client_contract_address))
                                     .unwrap_or_else(|second_error| {
                                         TonReadonlySnapshot::failed(format!(
                                             "{first_error:#}; retry after reconnect failed: {second_error:#}"
                                         ))
                                     })
-                            }
-                            Err(reconnect_error) => TonReadonlySnapshot::failed(format!(
-                                "{first_error:#}; reconnect failed: {reconnect_error:#}"
-                            )),
                         }
-                    }
+                        Err(reconnect_error) => TonReadonlySnapshot::failed(format!(
+                            "{first_error:#}; reconnect failed: {reconnect_error:#}"
+                        )),
+                    },
                 }
             }
         }
@@ -1191,7 +1191,6 @@ impl TonReadonlyState {
         match self {
             Self::Disabled => anyhow::bail!("TON liteclient is disabled"),
             Self::Failed { config, error } => {
-                eprintln!("TON liteclient is unavailable, reconnecting: {error}");
                 let config = config.clone();
                 match TonReadonlyClient::connect(&config) {
                     Ok(client) => {
@@ -1208,24 +1207,19 @@ impl TonReadonlyState {
             Self::Ready { config, client } => match client.prepare_client_register_message(request)
             {
                 Ok(message) => Ok(message),
-                Err(first_error) => {
-                    eprintln!(
-                        "long auth register prepare failed, reconnecting liteclient: {first_error:#}"
-                    );
-                    match TonReadonlyClient::connect(config) {
-                        Ok(replacement) => {
-                            *client = replacement;
-                            client
-                                .prepare_client_register_message(request)
-                                .with_context(|| {
-                                    format!("{first_error:#}; retry after reconnect also failed")
-                                })
-                        }
-                        Err(reconnect_error) => {
-                            anyhow::bail!("{first_error:#}; reconnect failed: {reconnect_error:#}");
-                        }
+                Err(first_error) => match TonReadonlyClient::connect(config) {
+                    Ok(replacement) => {
+                        *client = replacement;
+                        client
+                            .prepare_client_register_message(request)
+                            .with_context(|| {
+                                format!("{first_error:#}; retry after reconnect also failed")
+                            })
                     }
-                }
+                    Err(reconnect_error) => {
+                        anyhow::bail!("{first_error:#}; reconnect failed: {reconnect_error:#}");
+                    }
+                },
             },
         }
     }
@@ -1248,7 +1242,6 @@ impl TonReadonlyState {
         match self {
             Self::Disabled => anyhow::bail!("TON liteclient is disabled"),
             Self::Failed { config, error } => {
-                eprintln!("TON liteclient is unavailable, reconnecting: {error}");
                 let config = config.clone();
                 match TonReadonlyClient::connect(&config) {
                     Ok(client) => {
@@ -1264,24 +1257,19 @@ impl TonReadonlyState {
             }
             Self::Ready { config, client } => match client.prepare_client_top_up_message(request) {
                 Ok(message) => Ok(message),
-                Err(first_error) => {
-                    eprintln!(
-                        "client top-up prepare failed, reconnecting liteclient: {first_error:#}"
-                    );
-                    match TonReadonlyClient::connect(config) {
-                        Ok(replacement) => {
-                            *client = replacement;
-                            client
-                                .prepare_client_top_up_message(request)
-                                .with_context(|| {
-                                    format!("{first_error:#}; retry after reconnect also failed")
-                                })
-                        }
-                        Err(reconnect_error) => {
-                            anyhow::bail!("{first_error:#}; reconnect failed: {reconnect_error:#}");
-                        }
+                Err(first_error) => match TonReadonlyClient::connect(config) {
+                    Ok(replacement) => {
+                        *client = replacement;
+                        client
+                            .prepare_client_top_up_message(request)
+                            .with_context(|| {
+                                format!("{first_error:#}; retry after reconnect also failed")
+                            })
                     }
-                }
+                    Err(reconnect_error) => {
+                        anyhow::bail!("{first_error:#}; reconnect failed: {reconnect_error:#}");
+                    }
+                },
             },
         }
     }
@@ -1293,7 +1281,6 @@ impl TonReadonlyState {
         match self {
             Self::Disabled => anyhow::bail!("TON liteclient is disabled"),
             Self::Failed { config, error } => {
-                eprintln!("TON liteclient is unavailable, reconnecting: {error}");
                 let config = config.clone();
                 match TonReadonlyClient::connect(&config) {
                     Ok(client) => {
@@ -1310,28 +1297,19 @@ impl TonReadonlyState {
             Self::Ready { config, client } => {
                 match client.send_prepared_client_register_message(message) {
                     Ok(result) => Ok(result),
-                    Err(first_error) => {
-                        eprintln!(
-                            "long auth register send failed, reconnecting liteclient: {first_error:#}"
-                        );
-                        match TonReadonlyClient::connect(config) {
-                            Ok(replacement) => {
-                                *client = replacement;
-                                client
-                                    .send_prepared_client_register_message(message)
-                                    .with_context(|| {
-                                        format!(
-                                            "{first_error:#}; retry after reconnect also failed"
-                                        )
-                                    })
-                            }
-                            Err(reconnect_error) => {
-                                anyhow::bail!(
-                                    "{first_error:#}; reconnect failed: {reconnect_error:#}"
-                                );
-                            }
+                    Err(first_error) => match TonReadonlyClient::connect(config) {
+                        Ok(replacement) => {
+                            *client = replacement;
+                            client
+                                .send_prepared_client_register_message(message)
+                                .with_context(|| {
+                                    format!("{first_error:#}; retry after reconnect also failed")
+                                })
                         }
-                    }
+                        Err(reconnect_error) => {
+                            anyhow::bail!("{first_error:#}; reconnect failed: {reconnect_error:#}");
+                        }
+                    },
                 }
             }
         }
@@ -1344,7 +1322,6 @@ impl TonReadonlyState {
         match self {
             Self::Disabled => anyhow::bail!("TON liteclient is disabled"),
             Self::Failed { config, error } => {
-                eprintln!("TON liteclient is unavailable, reconnecting: {error}");
                 let config = config.clone();
                 match TonReadonlyClient::connect(&config) {
                     Ok(client) => {
@@ -1361,28 +1338,19 @@ impl TonReadonlyState {
             Self::Ready { config, client } => {
                 match client.send_prepared_client_top_up_message(message) {
                     Ok(result) => Ok(result),
-                    Err(first_error) => {
-                        eprintln!(
-                            "client top-up send failed, reconnecting liteclient: {first_error:#}"
-                        );
-                        match TonReadonlyClient::connect(config) {
-                            Ok(replacement) => {
-                                *client = replacement;
-                                client
-                                    .send_prepared_client_top_up_message(message)
-                                    .with_context(|| {
-                                        format!(
-                                            "{first_error:#}; retry after reconnect also failed"
-                                        )
-                                    })
-                            }
-                            Err(reconnect_error) => {
-                                anyhow::bail!(
-                                    "{first_error:#}; reconnect failed: {reconnect_error:#}"
-                                );
-                            }
+                    Err(first_error) => match TonReadonlyClient::connect(config) {
+                        Ok(replacement) => {
+                            *client = replacement;
+                            client
+                                .send_prepared_client_top_up_message(message)
+                                .with_context(|| {
+                                    format!("{first_error:#}; retry after reconnect also failed")
+                                })
                         }
-                    }
+                        Err(reconnect_error) => {
+                            anyhow::bail!("{first_error:#}; reconnect failed: {reconnect_error:#}");
+                        }
+                    },
                 }
             }
         }
@@ -1395,7 +1363,6 @@ impl TonReadonlyState {
         match self {
             Self::Disabled => anyhow::bail!("TON liteclient is disabled"),
             Self::Failed { config, error } => {
-                eprintln!("TON liteclient is unavailable, reconnecting: {error}");
                 let config = config.clone();
                 match TonReadonlyClient::connect(&config) {
                     Ok(client) => {
@@ -1412,28 +1379,19 @@ impl TonReadonlyState {
             Self::Ready { config, client } => {
                 match client.send_prepared_client_secret_hash_message(message) {
                     Ok(result) => Ok(result),
-                    Err(first_error) => {
-                        eprintln!(
-                            "client secret-hash send failed, reconnecting liteclient: {first_error:#}"
-                        );
-                        match TonReadonlyClient::connect(config) {
-                            Ok(replacement) => {
-                                *client = replacement;
-                                client
-                                    .send_prepared_client_secret_hash_message(message)
-                                    .with_context(|| {
-                                        format!(
-                                            "{first_error:#}; retry after reconnect also failed"
-                                        )
-                                    })
-                            }
-                            Err(reconnect_error) => {
-                                anyhow::bail!(
-                                    "{first_error:#}; reconnect failed: {reconnect_error:#}"
-                                );
-                            }
+                    Err(first_error) => match TonReadonlyClient::connect(config) {
+                        Ok(replacement) => {
+                            *client = replacement;
+                            client
+                                .send_prepared_client_secret_hash_message(message)
+                                .with_context(|| {
+                                    format!("{first_error:#}; retry after reconnect also failed")
+                                })
                         }
-                    }
+                        Err(reconnect_error) => {
+                            anyhow::bail!("{first_error:#}; reconnect failed: {reconnect_error:#}");
+                        }
+                    },
                 }
             }
         }
