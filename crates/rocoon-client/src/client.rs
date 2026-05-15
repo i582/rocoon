@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 
 use crate::config::RuntimeConfig;
 use rocoon_protocol::{self as cocoon, RunQueryOptions, WorkerInstanceV2, WorkerTypeV2};
-use rocoon_transport::{RunQueryOutput, Session, pow, ratls};
+use rocoon_transport::{QueryFinalInfo, RunQueryOutput, Session, pow, ratls};
 
 /// Authenticated Cocoon proxy client.
 ///
@@ -23,7 +23,46 @@ pub struct CocoonClient {
     session: Session<ratls::RatlsStream>,
     request_options: RunQueryOptions,
     proto_version: i32,
+    proxy_owner_address: String,
+    proxy_sc_address: String,
+    payment_status: AuthPaymentStatus,
     config: RuntimeConfig,
+}
+
+/// Snapshot of local client state that can be exposed through `/stats`.
+#[derive(Clone, Debug)]
+pub struct ClientStatus {
+    /// Cocoon proxy TCP address used by this session.
+    pub proxy_addr: String,
+    /// External TON owner wallet address from config.
+    pub owner_address: String,
+    /// Derived Cocoon wallet contract address used for proxy auth.
+    pub cocoon_wallet_address: String,
+    /// Protocol version negotiated with the proxy.
+    pub proto_version: i32,
+    /// Number of live proxy sessions owned by this prototype client.
+    pub active_proxy_connections: usize,
+    /// Proxy owner address returned by `client.connectedToProxy`.
+    pub proxy_owner_address: String,
+    /// Proxy smart-contract address returned by `client.connectedToProxy`.
+    pub proxy_sc_address: String,
+    /// Short-auth payment metadata returned by the proxy.
+    pub payment_status: AuthPaymentStatus,
+    /// On-chain balance is not available until TON wallet polling is ported.
+    pub wallet_balance: Option<i64>,
+    /// Wallet seqno is not available until TON wallet polling is ported.
+    pub wallet_seqno: Option<i64>,
+}
+
+/// Payment counters returned by `client.authorizeWithProxyShort`.
+#[derive(Clone, Debug)]
+pub struct AuthPaymentStatus {
+    /// Whether the proxy returned non-empty signed payment data.
+    pub signed_payment_available: bool,
+    /// Tokens already committed to proxy DB state.
+    pub tokens_committed_to_db: i64,
+    /// Maximum tokens the proxy currently allows for this client.
+    pub max_tokens: i64,
 }
 
 /// OpenAI-style model metadata derived from `client.getWorkerTypesV2`.
@@ -58,6 +97,8 @@ pub struct HttpExchange {
     pub headers: Vec<(String, String)>,
     /// Full response body assembled from head and streamed parts.
     pub payload: Vec<u8>,
+    /// Terminal Cocoon query metadata, when the proxy supplied it.
+    pub final_info: Option<QueryFinalInfo>,
 }
 
 impl CocoonClient {
@@ -102,7 +143,7 @@ impl CocoonClient {
             Session::connect(tls).context("Cocoon tcp.connect session handshake")?;
         println!("session connected: id={}", connected.id);
 
-        let proto_version = authorize(&mut session, config)?;
+        let authorization = authorize(&mut session, config)?;
 
         Ok(Self {
             session,
@@ -113,9 +154,29 @@ impl CocoonClient {
                 min_config_version: config.min_config_version,
                 public_key: None,
             },
-            proto_version,
+            proto_version: authorization.proto_version,
+            proxy_owner_address: authorization.proxy_owner_address,
+            proxy_sc_address: authorization.proxy_sc_address,
+            payment_status: authorization.payment_status,
             config: config.clone(),
         })
+    }
+
+    /// Returns the locally known connection, wallet, and payment status.
+    #[must_use]
+    pub fn status(&self) -> ClientStatus {
+        ClientStatus {
+            proxy_addr: self.config.proxy_addr.clone(),
+            owner_address: self.config.owner_address.clone(),
+            cocoon_wallet_address: self.config.cocoon_wallet_address.clone(),
+            proto_version: self.proto_version,
+            active_proxy_connections: 1,
+            proxy_owner_address: self.proxy_owner_address.clone(),
+            proxy_sc_address: self.proxy_sc_address.clone(),
+            payment_status: self.payment_status.clone(),
+            wallet_balance: None,
+            wallet_seqno: None,
+        }
     }
 
     /// Returns the current model/worker list from the proxy.
@@ -209,12 +270,23 @@ fn json_request_headers(body_len: usize) -> Vec<(&'static str, String)> {
     ]
 }
 
+/// Data collected while authenticating a Cocoon proxy session.
+struct AuthorizationInfo {
+    proto_version: i32,
+    proxy_owner_address: String,
+    proxy_sc_address: String,
+    payment_status: AuthPaymentStatus,
+}
+
 /// Performs Cocoon proxy authorization and returns the negotiated protocol version.
 ///
 /// The current prototype supports short authorization with a local secret. Long
 /// authorization requires on-chain registration/top-up and is intentionally not
 /// implemented here.
-fn authorize(session: &mut Session<ratls::RatlsStream>, config: &RuntimeConfig) -> Result<i32> {
+fn authorize(
+    session: &mut Session<ratls::RatlsStream>,
+    config: &RuntimeConfig,
+) -> Result<AuthorizationInfo> {
     println!(
         "authenticating owner {} via Cocoon wallet {}",
         config.owner_address, config.cocoon_wallet_address
@@ -225,8 +297,13 @@ fn authorize(session: &mut Session<ratls::RatlsStream>, config: &RuntimeConfig) 
         .make_request(&request)
         .context("client.connectToProxy")?;
     let connected_to_proxy = cocoon::decode_connected_to_proxy(&response)?;
+    let proto_version = connected_to_proxy.params.proto_version.unwrap_or(0);
+    let proxy_owner_address =
+        String::from_utf8_lossy(connected_to_proxy.params.proxy_owner_address).into_owned();
+    let proxy_sc_address =
+        String::from_utf8_lossy(connected_to_proxy.params.proxy_sc_address).into_owned();
 
-    match connected_to_proxy.auth {
+    let payment_status = match connected_to_proxy.auth {
         cocoon::ProxyAuth::Short { secret_hash, .. } => {
             let Some(secret) = config.client_secret.as_deref() else {
                 anyhow::bail!("short auth requires client.secret in TOML or COCOON_CLIENT_SECRET");
@@ -238,16 +315,21 @@ fn authorize(session: &mut Session<ratls::RatlsStream>, config: &RuntimeConfig) 
                 .make_request(&request)
                 .context("client.authorizeWithProxyShort")?;
             let auth = cocoon::decode_authorization_with_proxy(&response)?;
-            print_authorization_result(&auth)?;
+            payment_status_from_auth(&auth)?
         }
         cocoon::ProxyAuth::Long { nonce } => {
             anyhow::bail!(
                 "auth: long nonce={nonce}; on-chain register is required before Rust can serve requests"
             );
         }
-    }
+    };
 
-    Ok(connected_to_proxy.params.proto_version.unwrap_or(0))
+    Ok(AuthorizationInfo {
+        proto_version,
+        proxy_owner_address,
+        proxy_sc_address,
+        payment_status,
+    })
 }
 
 /// Checks that the configured secret matches the proxy-provided challenge hash.
@@ -259,18 +341,27 @@ fn verify_secret_hash(secret: &str, expected: &[u8; 32]) -> Result<()> {
     Ok(())
 }
 
-/// Converts the proxy authorization result into either a concise log or error.
-fn print_authorization_result(auth: &cocoon::AuthorizationWithProxy<'_>) -> Result<()> {
+/// Converts the proxy authorization result into local payment status.
+fn payment_status_from_auth(
+    auth: &cocoon::AuthorizationWithProxy<'_>,
+) -> Result<AuthPaymentStatus> {
     match auth {
         cocoon::AuthorizationWithProxy::Success {
-            signed_payment: _,
+            signed_payment,
             tokens_committed_to_db,
             max_tokens,
         } => {
             println!(
                 "auth success: tokens_committed_to_db={tokens_committed_to_db} max_tokens={max_tokens}"
             );
-            Ok(())
+            Ok(AuthPaymentStatus {
+                signed_payment_available: matches!(
+                    signed_payment,
+                    cocoon::SignedPayment::Data { .. }
+                ),
+                tokens_committed_to_db: *tokens_committed_to_db,
+                max_tokens: *max_tokens,
+            })
         }
         cocoon::AuthorizationWithProxy::Failed { error_code, error } => {
             anyhow::bail!("auth failed: code={error_code} error={}", utf8(error)?)
@@ -283,9 +374,14 @@ fn print_authorization_result(auth: &cocoon::AuthorizationWithProxy<'_>) -> Resu
 /// The first `client.queryAnswerEx` carries the HTTP response head. Subsequent
 /// `client.queryAnswerPartEx` packets carry additional response body bytes.
 fn http_exchange_from_output(output: RunQueryOutput) -> Result<HttpExchange> {
-    let response = cocoon::decode_http_response(&output.response_head)?;
+    let RunQueryOutput {
+        response_head,
+        payload_parts,
+        final_info,
+    } = output;
+    let response = cocoon::decode_http_response(&response_head)?;
     let mut payload = response.payload.to_vec();
-    for part in output.payload_parts {
+    for part in payload_parts {
         payload.extend(part);
     }
 
@@ -303,6 +399,7 @@ fn http_exchange_from_output(output: RunQueryOutput) -> Result<HttpExchange> {
             })
             .collect::<Result<_>>()?,
         payload,
+        final_info,
     })
 }
 

@@ -10,11 +10,15 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 
 use rocoon_client::{CocoonClient, HttpExchange};
+
+mod stats;
+use stats::{CompletionFailure, CompletionSuccess, ServerStats};
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
@@ -28,6 +32,12 @@ pub struct Defaults {
     pub max_tokens: i32,
     /// Default Cocoon request timeout in seconds.
     pub timeout: f64,
+}
+
+/// Shared state for all local HTTP request handler threads.
+struct ServerState {
+    client: Mutex<CocoonClient>,
+    stats: Mutex<ServerStats>,
 }
 
 /// Minimal parsed HTTP request shape needed by this server.
@@ -48,9 +58,10 @@ struct CompletionRequest {
 
 /// Serves the local OpenAI-compatible API forever.
 ///
-/// Supported endpoints are `/health`, `/v1/models`, `/v1/chat/completions`,
-/// and `/v1/completions`. Each accepted TCP connection is handled on a separate
-/// thread while access to the underlying Cocoon client remains serialized.
+/// Supported endpoints are `/health`, `/stats`, `/jsonstats`, `/v1/stats`,
+/// `/v1/models`, `/v1/chat/completions`, and `/v1/completions`. Each accepted
+/// TCP connection is handled on a separate thread while access to the
+/// underlying Cocoon client remains serialized.
 ///
 /// # Errors
 ///
@@ -61,12 +72,15 @@ pub fn serve(listen_addr: &str, client: CocoonClient, defaults: Defaults) -> Res
     let listener = TcpListener::bind(listen_addr).with_context(|| format!("bind {listen_addr}"))?;
     println!("OpenAI-compatible HTTP server listening on http://{listen_addr}");
 
-    let client = Arc::new(Mutex::new(client));
+    let state = Arc::new(ServerState {
+        client: Mutex::new(client),
+        stats: Mutex::new(ServerStats::default()),
+    });
     for stream in listener.incoming() {
         let stream = stream.context("accept HTTP connection")?;
-        let client = Arc::clone(&client);
+        let state = Arc::clone(&state);
         thread::spawn(move || {
-            if let Err(error) = handle_connection(stream, &client, defaults) {
+            if let Err(error) = handle_connection(stream, &state, defaults) {
                 eprintln!("HTTP request failed: {error:#}");
                 if let Some(mut stream) = error.stream {
                     let body = json!({"error": {"message": error.message, "type": "rocoon_error"}});
@@ -84,7 +98,7 @@ pub fn serve(listen_addr: &str, client: CocoonClient, defaults: Defaults) -> Res
 /// error response if the socket is usable.
 fn handle_connection(
     mut stream: TcpStream,
-    client: &Arc<Mutex<CocoonClient>>,
+    state: &ServerState,
     defaults: Defaults,
 ) -> std::result::Result<(), HttpError> {
     let request = read_http_request(&mut stream)
@@ -94,59 +108,10 @@ fn handle_connection(
     match (request.method.as_str(), path) {
         ("GET", "/health") => write_json(&mut stream, 200, &json!({"status": "ok"}), Vec::new())
             .map_err(|error| HttpError::new(None, 500, &error)),
-        ("GET", "/v1/models") => {
-            let models = client
-                .lock()
-                .map_err(|_| {
-                    HttpError::message(stream.try_clone().ok(), 500, "Cocoon client mutex poisoned")
-                })?
-                .get_worker_types_v2()
-                .map_err(|error| HttpError::new(stream.try_clone().ok(), 502, &error))?;
-            let data: Vec<_> = models
-                .into_iter()
-                .map(|model| {
-                    json!({
-                        "id": model.id,
-                        "object": "model",
-                        "created": 0,
-                        "owned_by": "?",
-                        "workers": model.workers.into_iter().map(|worker| {
-                            json!({
-                                "coefficient": worker.coefficient,
-                                "running_requests": worker.active_requests,
-                                "max_running_requests": worker.max_active_requests,
-                            })
-                        }).collect::<Vec<_>>(),
-                    })
-                })
-                .collect();
-            write_json(
-                &mut stream,
-                200,
-                &json!({"object": "list", "data": data}),
-                Vec::new(),
-            )
-            .map_err(|error| HttpError::new(None, 500, &error))
-        }
+        ("GET", "/stats" | "/jsonstats" | "/v1/stats") => handle_stats(&mut stream, state),
+        ("GET", "/v1/models") => handle_models(&mut stream, state),
         ("POST", "/v1/chat/completions" | "/v1/completions") => {
-            let completion = parse_completion_request(&request.body, defaults)
-                .map_err(|error| HttpError::new(stream.try_clone().ok(), 400, &error))?;
-            let response = client
-                .lock()
-                .map_err(|_| {
-                    HttpError::message(stream.try_clone().ok(), 500, "Cocoon client mutex poisoned")
-                })?
-                .run_chat_completion(
-                    &completion.model,
-                    path,
-                    &completion.body,
-                    completion.max_coefficient,
-                    completion.max_tokens,
-                    completion.timeout,
-                )
-                .map_err(|error| HttpError::new(stream.try_clone().ok(), 502, &error))?;
-            write_cocoon_http_response(&mut stream, response)
-                .map_err(|error| HttpError::new(None, 500, &error))
+            handle_completion(&mut stream, state, defaults, path, &request.body)
         }
         _ => write_json(
             &mut stream,
@@ -156,6 +121,133 @@ fn handle_connection(
         )
         .map_err(|error| HttpError::new(None, 500, &error)),
     }
+}
+
+/// Writes the local runtime statistics response.
+fn handle_stats(stream: &mut TcpStream, state: &ServerState) -> std::result::Result<(), HttpError> {
+    let client_status = state
+        .client
+        .lock()
+        .map_err(|_| {
+            HttpError::message(stream.try_clone().ok(), 500, "Cocoon client mutex poisoned")
+        })?
+        .status();
+    let stats_json = state
+        .stats
+        .lock()
+        .map_err(|_| HttpError::message(stream.try_clone().ok(), 500, "stats mutex poisoned"))?
+        .to_json(&client_status);
+    write_json(stream, 200, &stats_json, Vec::new())
+        .map_err(|error| HttpError::new(None, 500, &error))
+}
+
+/// Writes `/v1/models` from Cocoon worker metadata.
+fn handle_models(
+    stream: &mut TcpStream,
+    state: &ServerState,
+) -> std::result::Result<(), HttpError> {
+    let models = state
+        .client
+        .lock()
+        .map_err(|_| {
+            HttpError::message(stream.try_clone().ok(), 500, "Cocoon client mutex poisoned")
+        })?
+        .get_worker_types_v2()
+        .map_err(|error| HttpError::new(stream.try_clone().ok(), 502, &error))?;
+    let data: Vec<_> = models
+        .into_iter()
+        .map(|model| {
+            json!({
+                "id": model.id,
+                "object": "model",
+                "created": 0,
+                "owned_by": "?",
+                "workers": model.workers.into_iter().map(|worker| {
+                    json!({
+                        "coefficient": worker.coefficient,
+                        "running_requests": worker.active_requests,
+                        "max_running_requests": worker.max_active_requests,
+                    })
+                }).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    write_json(
+        stream,
+        200,
+        &json!({"object": "list", "data": data}),
+        Vec::new(),
+    )
+    .map_err(|error| HttpError::new(None, 500, &error))
+}
+
+/// Runs a completion request and records local usage statistics.
+fn handle_completion(
+    stream: &mut TcpStream,
+    state: &ServerState,
+    defaults: Defaults,
+    path: &str,
+    body: &[u8],
+) -> std::result::Result<(), HttpError> {
+    let completion = parse_completion_request(body, defaults)
+        .map_err(|error| HttpError::new(stream.try_clone().ok(), 400, &error))?;
+    state
+        .stats
+        .lock()
+        .map_err(|_| HttpError::message(stream.try_clone().ok(), 500, "stats mutex poisoned"))?
+        .record_completion_started();
+    let started_at = Instant::now();
+    let response = state
+        .client
+        .lock()
+        .map_err(|_| {
+            HttpError::message(stream.try_clone().ok(), 500, "Cocoon client mutex poisoned")
+        })?
+        .run_chat_completion(
+            &completion.model,
+            path,
+            &completion.body,
+            completion.max_coefficient,
+            completion.max_tokens,
+            completion.timeout,
+        );
+    let duration = started_at.elapsed();
+    let response = match response {
+        Ok(response) => {
+            state
+                .stats
+                .lock()
+                .map_err(|_| {
+                    HttpError::message(stream.try_clone().ok(), 500, "stats mutex poisoned")
+                })?
+                .record_completion_success(CompletionSuccess {
+                    model: &completion.model,
+                    path,
+                    request_bytes: completion.body.len(),
+                    duration,
+                    response: &response,
+                });
+            response
+        }
+        Err(error) => {
+            let message = format!("{error:#}");
+            state
+                .stats
+                .lock()
+                .map_err(|_| {
+                    HttpError::message(stream.try_clone().ok(), 500, "stats mutex poisoned")
+                })?
+                .record_completion_failure(CompletionFailure {
+                    model: &completion.model,
+                    path,
+                    request_bytes: completion.body.len(),
+                    duration,
+                    error: &message,
+                });
+            return Err(HttpError::new(stream.try_clone().ok(), 502, &error));
+        }
+    };
+    write_cocoon_http_response(stream, response).map_err(|error| HttpError::new(None, 500, &error))
 }
 
 /// HTTP error carrying enough context to respond on the original stream.

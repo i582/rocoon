@@ -90,12 +90,37 @@ pub struct TcpConnected {
     pub id: i64,
 }
 
+/// Owned token counters copied from Cocoon `client.queryFinalInfo`.
+#[derive(Clone, Copy, Debug, Default)]
+#[allow(clippy::struct_field_names)]
+pub struct TokenUsage {
+    pub prompt_tokens_used: i64,
+    pub cached_tokens_used: i64,
+    pub completion_tokens_used: i64,
+    pub reasoning_tokens_used: i64,
+    pub total_tokens_used: i64,
+}
+
+/// Owned final metadata attached to the terminal `client.runQueryEx` packet.
+#[derive(Clone, Debug)]
+pub struct QueryFinalInfo {
+    pub tokens_used: TokenUsage,
+    pub worker_debug: Option<String>,
+    pub proxy_debug: Option<String>,
+    pub proxy_start_time: Option<f64>,
+    pub proxy_end_time: Option<f64>,
+    pub worker_start_time: Option<f64>,
+    pub worker_end_time: Option<f64>,
+}
+
 /// Aggregated result of one `client.runQueryEx` call.
 pub struct RunQueryOutput {
     /// First answer packet containing the encoded HTTP response head.
     pub response_head: Vec<u8>,
     /// Additional body chunks from subsequent answer part packets.
     pub payload_parts: Vec<Vec<u8>>,
+    /// Terminal packet metadata with token counters and optional debug strings.
+    pub final_info: Option<QueryFinalInfo>,
 }
 
 impl<RW: Read + Write> Session<RW> {
@@ -229,10 +254,12 @@ impl<RW: Read + Write> Session<RW> {
                                 anyhow::bail!("duplicate client.queryAnswerEx");
                             }
                             let answer = answer.to_vec();
+                            let final_info = final_info.as_ref().map(query_final_info_from_tl);
                             if final_info.is_some() {
                                 return Ok(RunQueryOutput {
                                     response_head: answer,
                                     payload_parts,
+                                    final_info,
                                 });
                             }
                             response_head = Some(answer);
@@ -249,12 +276,14 @@ impl<RW: Read + Write> Session<RW> {
                                 );
                             }
                             payload_parts.push(answer.to_vec());
+                            let final_info = final_info.as_ref().map(query_final_info_from_tl);
                             if final_info.is_some() {
                                 let response_head =
                                     response_head.context("missing client.queryAnswerEx")?;
                                 return Ok(RunQueryOutput {
                                     response_head,
                                     payload_parts,
+                                    final_info,
                                 });
                             }
                         }
@@ -329,4 +358,28 @@ impl<RW: Read + Write> Session<RW> {
             .context("read frame payload")?;
         Ok(payload)
     }
+}
+
+/// Copies borrowed TL final metadata out of the frame buffer.
+fn query_final_info_from_tl(value: &cocoon::QueryFinalInfo<'_>) -> QueryFinalInfo {
+    QueryFinalInfo {
+        tokens_used: TokenUsage {
+            prompt_tokens_used: value.tokens_used.prompt_tokens_used,
+            cached_tokens_used: value.tokens_used.cached_tokens_used,
+            completion_tokens_used: value.tokens_used.completion_tokens_used,
+            reasoning_tokens_used: value.tokens_used.reasoning_tokens_used,
+            total_tokens_used: value.tokens_used.total_tokens_used,
+        },
+        worker_debug: value.worker_debug.map(bytes_to_lossy_string),
+        proxy_debug: value.proxy_debug.map(bytes_to_lossy_string),
+        proxy_start_time: value.proxy_start_time,
+        proxy_end_time: value.proxy_end_time,
+        worker_start_time: value.worker_start_time,
+        worker_end_time: value.worker_end_time,
+    }
+}
+
+/// Debug strings are proxy-provided; keep them readable even if they are not UTF-8.
+fn bytes_to_lossy_string(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
 }

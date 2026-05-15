@@ -8,5 +8,8 @@ mod client;
 pub mod config;
 mod wallet;
 
-pub use client::{CocoonClient, HttpExchange, ModelInfo, WorkerInfo};
+pub use client::{
+    AuthPaymentStatus, ClientStatus, CocoonClient, HttpExchange, ModelInfo, WorkerInfo,
+};
 pub use config::RuntimeConfig;
+pub use rocoon_transport::{QueryFinalInfo, TokenUsage};

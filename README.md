@@ -15,6 +15,7 @@ Current scope:
 - Implement `/v1/models` through `client.getWorkerTypesV2`.
 - Implement `/v1/chat/completions` and `/v1/completions` through `client.runQueryEx`.
 - Collect streamed Cocoon answer parts before returning the local HTTP response.
+- Expose local runtime statistics through `/stats`, `/jsonstats`, and `/v1/stats`.
 
 Workspace layout:
 
@@ -32,6 +33,7 @@ Not implemented yet:
 
 - TON root contract reading.
 - Cocoon wallet deploy/top-up/register.
+- On-chain wallet balance/seqno polling.
 - RA-TLS/TEE quote verification.
 - True local HTTP streaming; streamed Cocoon chunks are aggregated before the local response is sent.
 
@@ -93,10 +95,17 @@ API:
 
 ```bash
 curl http://127.0.0.1:9999/v1/models
+curl http://127.0.0.1:9999/stats
 curl http://127.0.0.1:9999/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"Qwen/Qwen3-32B","messages":[{"role":"user","content":"Say hello"}],"max_tokens":8}'
 ```
+
+`/stats` returns locally observed request counters, token usage from Cocoon
+`final_info`, worker response `usage.total_cost`, proxy/debug strings from the
+last request, proxy connection metadata, and the derived Cocoon wallet address.
+TON wallet balance and seqno are currently `null` because Rust does not poll the
+chain yet.
 
 When the proxy returns `auth: short`, `rocoon` uses `client.secret` or
 `COCOON_CLIENT_SECRET` to call `client.authorizeWithProxyShort`.
