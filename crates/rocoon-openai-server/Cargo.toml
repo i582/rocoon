@@ -12,5 +12,5 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
-rocoon-client = { path = "../rocoon-client" }
+rocoon-client = { workspace = true }
 serde_json.workspace = true

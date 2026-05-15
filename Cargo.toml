@@ -35,6 +35,10 @@ unimplemented = "deny"
 panic = "deny"
 
 [workspace.dependencies]
+rocoon-client = { path = "crates/rocoon-client" }
+rocoon-openai-server = { path = "crates/rocoon-openai-server" }
+rocoon-protocol = { path = "crates/rocoon-protocol" }
+rocoon-transport = { path = "crates/rocoon-transport" }
 anyhow = "1"
 base64 = "0.22"
 ed25519-dalek = "2.2"
@@ -66,5 +70,5 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
-rocoon-client = { path = "crates/rocoon-client" }
-rocoon-openai-server = { path = "crates/rocoon-openai-server" }
+rocoon-client = { workspace = true }
+rocoon-openai-server = { workspace = true }
