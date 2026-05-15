@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
 use crate::config::RuntimeConfig;
+use crate::ton_readonly::{TonReadonlyClient, TonReadonlySnapshot};
 use rocoon_protocol::{self as cocoon, RunQueryOptions, WorkerInstanceV2, WorkerTypeV2};
 use rocoon_transport::{QueryFinalInfo, RunQueryOutput, Session, pow, ratls};
 
@@ -26,6 +27,7 @@ pub struct CocoonClient {
     proxy_owner_address: String,
     proxy_sc_address: String,
     payment_status: AuthPaymentStatus,
+    ton_readonly: TonReadonlyState,
     config: RuntimeConfig,
 }
 
@@ -48,10 +50,24 @@ pub struct ClientStatus {
     pub proxy_sc_address: String,
     /// Short-auth payment metadata returned by the proxy.
     pub payment_status: AuthPaymentStatus,
-    /// On-chain balance is not available until TON wallet polling is ported.
-    pub wallet_balance: Option<i64>,
-    /// Wallet seqno is not available until TON wallet polling is ported.
-    pub wallet_seqno: Option<i64>,
+    /// Whether read-only TON liteserver polling is enabled.
+    pub ton_readonly_enabled: bool,
+    /// Whether the latest read-only TON query succeeded.
+    pub ton_readonly_ok: bool,
+    /// Last read-only TON query/init error.
+    pub ton_readonly_error: Option<String>,
+    /// Masterchain seqno used for the latest wallet account read.
+    pub masterchain_seqno: Option<u32>,
+    /// Optional root contract address from config.
+    pub root_contract_address: Option<String>,
+    /// On-chain Cocoon wallet balance in nanotons.
+    pub wallet_balance: Option<u64>,
+    /// Cocoon wallet seqno parsed from the first 32 bits of the data cell.
+    pub wallet_seqno: Option<u32>,
+    /// TON account state for the Cocoon wallet.
+    pub wallet_state: Option<String>,
+    /// Last transaction logical time for the Cocoon wallet account.
+    pub wallet_last_tx_lt: Option<u64>,
 }
 
 /// Payment counters returned by `client.authorizeWithProxyShort`.
@@ -144,6 +160,7 @@ impl CocoonClient {
         println!("session connected: id={}", connected.id);
 
         let authorization = authorize(&mut session, config)?;
+        let ton_readonly = TonReadonlyState::new(config);
 
         Ok(Self {
             session,
@@ -158,6 +175,7 @@ impl CocoonClient {
             proxy_owner_address: authorization.proxy_owner_address,
             proxy_sc_address: authorization.proxy_sc_address,
             payment_status: authorization.payment_status,
+            ton_readonly,
             config: config.clone(),
         })
     }
@@ -165,6 +183,10 @@ impl CocoonClient {
     /// Returns the locally known connection, wallet, and payment status.
     #[must_use]
     pub fn status(&self) -> ClientStatus {
+        let ton = self
+            .ton_readonly
+            .snapshot(&self.config.cocoon_wallet_address);
+        let wallet = ton.wallet.as_ref();
         ClientStatus {
             proxy_addr: self.config.proxy_addr.clone(),
             owner_address: self.config.owner_address.clone(),
@@ -174,8 +196,15 @@ impl CocoonClient {
             proxy_owner_address: self.proxy_owner_address.clone(),
             proxy_sc_address: self.proxy_sc_address.clone(),
             payment_status: self.payment_status.clone(),
-            wallet_balance: None,
-            wallet_seqno: None,
+            ton_readonly_enabled: ton.enabled,
+            ton_readonly_ok: ton.ok,
+            ton_readonly_error: ton.last_error,
+            masterchain_seqno: ton.masterchain_seqno,
+            root_contract_address: self.config.ton.root_contract_address.clone(),
+            wallet_balance: wallet.and_then(|wallet| wallet.balance),
+            wallet_seqno: wallet.and_then(|wallet| wallet.seqno),
+            wallet_state: wallet.map(|wallet| wallet.state.as_str().to_string()),
+            wallet_last_tx_lt: wallet.and_then(|wallet| wallet.last_tx_lt),
         }
     }
 
@@ -256,6 +285,35 @@ impl CocoonClient {
         let replacement = Self::connect(&self.config)?;
         *self = replacement;
         Ok(())
+    }
+}
+
+/// Initialization state for optional read-only TON diagnostics.
+enum TonReadonlyState {
+    Disabled,
+    Ready(TonReadonlyClient),
+    Failed(String),
+}
+
+impl TonReadonlyState {
+    fn new(config: &RuntimeConfig) -> Self {
+        if !config.ton.readonly_enabled {
+            return Self::Disabled;
+        }
+        match TonReadonlyClient::connect(&config.ton) {
+            Ok(client) => Self::Ready(client),
+            Err(error) => Self::Failed(format!("{error:#}")),
+        }
+    }
+
+    fn snapshot(&self, wallet_address: &str) -> TonReadonlySnapshot {
+        match self {
+            Self::Disabled => TonReadonlySnapshot::disabled(),
+            Self::Failed(error) => TonReadonlySnapshot::failed(error.clone()),
+            Self::Ready(client) => client
+                .wallet_snapshot(wallet_address)
+                .unwrap_or_else(|error| TonReadonlySnapshot::failed(format!("{error:#}"))),
+        }
     }
 }
 

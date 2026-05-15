@@ -6,6 +6,7 @@
 
 mod client;
 pub mod config;
+mod ton_readonly;
 mod wallet;
 
 pub use client::{

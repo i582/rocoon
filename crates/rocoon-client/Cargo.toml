@@ -18,5 +18,7 @@ rocoon-protocol = { path = "../rocoon-protocol" }
 rocoon-transport = { path = "../rocoon-transport" }
 serde.workspace = true
 sha2.workspace = true
+tokio.workspace = true
+ton.workspace = true
 ton_core.workspace = true
 toml.workspace = true

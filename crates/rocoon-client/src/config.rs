@@ -20,6 +20,7 @@ use crate::wallet;
 const DEFAULT_CONFIG_PATH: &str = "rocoon.toml";
 const DEFAULT_PROXY_ADDR: &str = "91.108.4.11:8888";
 const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 5;
+const DEFAULT_TON_QUERY_TIMEOUT_MILLIS: u64 = 5_000;
 
 /// Validated configuration used by networking, Cocoon auth, and the HTTP API.
 ///
@@ -49,6 +50,23 @@ pub struct RuntimeConfig {
     pub max_tokens: i32,
     /// Default Cocoon request timeout in seconds.
     pub request_timeout: f64,
+    /// TON liteclient read-only settings used by `/stats`.
+    pub ton: TonRuntimeConfig,
+}
+
+/// Validated read-only TON liteclient configuration.
+#[derive(Debug, Clone)]
+pub struct TonRuntimeConfig {
+    /// Whether `rocoon` should read wallet/root state from TON liteservers.
+    pub readonly_enabled: bool,
+    /// Selects mainnet built-in liteserver config when no explicit config is set.
+    pub mainnet: bool,
+    /// Optional TON global config JSON path.
+    pub config_path: Option<PathBuf>,
+    /// Optional root contract address shown in diagnostics and used by future root polling.
+    pub root_contract_address: Option<String>,
+    /// Per-query timeout passed to `ton-rs` liteclient requests.
+    pub query_timeout_millis: u64,
 }
 
 /// TOML root object before validation and environment overrides.
@@ -59,6 +77,7 @@ struct FileConfig {
     server: ServerConfig,
     client: ClientConfig,
     request: RequestConfig,
+    ton: TonConfig,
 }
 
 /// Network-related TOML section.
@@ -93,6 +112,17 @@ struct RequestConfig {
     max_coefficient: i32,
     max_tokens: i32,
     timeout_secs: f64,
+}
+
+/// Read-only TON liteclient TOML section.
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct TonConfig {
+    readonly_enabled: bool,
+    mainnet: bool,
+    config_path: Option<PathBuf>,
+    root_contract_address: Option<String>,
+    query_timeout_millis: u64,
 }
 
 impl RuntimeConfig {
@@ -145,6 +175,24 @@ impl RuntimeConfig {
             config.request.timeout_secs =
                 value.parse().context("parse COCOON_REQUEST_TIMEOUT_SECS")?;
         }
+        if let Ok(value) = env::var("ROCOON_TON_READONLY_ENABLED") {
+            config.ton.readonly_enabled =
+                parse_bool(&value).context("parse ROCOON_TON_READONLY_ENABLED")?;
+        }
+        if let Ok(value) = env::var("ROCOON_TON_MAINNET") {
+            config.ton.mainnet = parse_bool(&value).context("parse ROCOON_TON_MAINNET")?;
+        }
+        if let Ok(value) = env::var("ROCOON_TON_CONFIG_PATH") {
+            config.ton.config_path = Some(PathBuf::from(value));
+        }
+        if let Ok(value) = env::var("COCOON_ROOT_CONTRACT_ADDRESS") {
+            config.ton.root_contract_address = Some(value);
+        }
+        if let Ok(value) = env::var("ROCOON_TON_QUERY_TIMEOUT_MILLIS") {
+            config.ton.query_timeout_millis = value
+                .parse()
+                .context("parse ROCOON_TON_QUERY_TIMEOUT_MILLIS")?;
+        }
         validate(&config)?;
         let cocoon_wallet_address = wallet::derive_cocoon_wallet_address(
             &config.client.owner_address,
@@ -166,6 +214,13 @@ impl RuntimeConfig {
             max_coefficient: config.request.max_coefficient,
             max_tokens: config.request.max_tokens,
             request_timeout: config.request.timeout_secs,
+            ton: TonRuntimeConfig {
+                readonly_enabled: config.ton.readonly_enabled,
+                mainnet: config.ton.mainnet,
+                config_path: config.ton.config_path,
+                root_contract_address: config.ton.root_contract_address,
+                query_timeout_millis: config.ton.query_timeout_millis,
+            },
         })
     }
 }
@@ -193,6 +248,18 @@ impl Default for RequestConfig {
             max_coefficient: 4000,
             max_tokens: 10000,
             timeout_secs: 120.0,
+        }
+    }
+}
+
+impl Default for TonConfig {
+    fn default() -> Self {
+        Self {
+            readonly_enabled: true,
+            mainnet: true,
+            config_path: None,
+            root_contract_address: None,
+            query_timeout_millis: DEFAULT_TON_QUERY_TIMEOUT_MILLIS,
         }
     }
 }
@@ -240,6 +307,15 @@ fn read_config(path: &Path, explicit: bool) -> Result<FileConfig> {
     }
 }
 
+/// Parses environment booleans accepted by common service managers and shells.
+fn parse_bool(value: &str) -> Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => anyhow::bail!("expected one of: 1, 0, true, false, yes, no, on, off"),
+    }
+}
+
 /// Performs semantic validation that TOML deserialization cannot express.
 ///
 /// This keeps downstream code from repeatedly checking for empty addresses,
@@ -268,6 +344,19 @@ fn validate(config: &FileConfig) -> Result<()> {
     }
     if config.request.timeout_secs <= 0.0 {
         anyhow::bail!("request.timeout_secs must be greater than zero");
+    }
+    if let Some(path) = &config.ton.config_path
+        && path.as_os_str().is_empty()
+    {
+        anyhow::bail!("ton.config_path must not be empty when set");
+    }
+    if let Some(address) = &config.ton.root_contract_address
+        && address.trim().is_empty()
+    {
+        anyhow::bail!("ton.root_contract_address must not be empty when set");
+    }
+    if config.ton.query_timeout_millis == 0 {
+        anyhow::bail!("ton.query_timeout_millis must be greater than zero");
     }
     Ok(())
 }

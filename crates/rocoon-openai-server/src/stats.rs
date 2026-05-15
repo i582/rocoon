@@ -358,7 +358,7 @@ fn format_nanotons_u64_as_ton(value: u64) -> String {
     format!("{whole}.{frac:09}")
 }
 
-fn wallet_source(client: &ClientStatus) -> &'static str {
+const fn wallet_source(client: &ClientStatus) -> &'static str {
     match (client.ton_readonly_enabled, client.ton_readonly_ok) {
         (false, _) => "disabled_ton_wallet_polling",
         (true, true) => "ton_liteclient",

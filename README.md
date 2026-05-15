@@ -16,6 +16,7 @@ Current scope:
 - Implement `/v1/chat/completions` and `/v1/completions` through `client.runQueryEx`.
 - Collect streamed Cocoon answer parts before returning the local HTTP response.
 - Expose local runtime statistics through `/stats`, `/jsonstats`, and `/v1/stats`.
+- Read Cocoon wallet balance/seqno from TON liteservers without sending transactions.
 
 Workspace layout:
 
@@ -33,7 +34,6 @@ Not implemented yet:
 
 - TON root contract reading.
 - Cocoon wallet deploy/top-up/register.
-- On-chain wallet balance/seqno polling.
 - RA-TLS/TEE quote verification.
 - True local HTTP streaming; streamed Cocoon chunks are aggregated before the local response is sent.
 
@@ -72,12 +72,25 @@ min_config_version = 0
 max_coefficient = 4000
 max_tokens = 10000
 timeout_secs = 120.0
+
+[ton]
+readonly_enabled = true
+mainnet = true
+query_timeout_millis = 5000
+# config_path = "/path/to/global.config.json"
+# root_contract_address = "<cocoon-root-contract-address>"
 ```
 
 `client.owner_address` matches the C++ client config: it is the external owner
 wallet address. `rocoon` derives the Cocoon wallet smart-contract address from
 `client.owner_address` and `client.node_wallet_key`, then sends that derived
 contract address in `client.connectToProxy`.
+
+`[ton]` is read-only. It uses TON liteservers to fill `/stats.wallet.balance`,
+`/stats.wallet.seqno`, account state, last transaction logical time, and the
+masterchain seqno used for the read. It does not deploy contracts, top up
+wallets, or send external messages. Omit `config_path` to use the built-in
+mainnet/testnet config from `ton-rs`.
 
 Use a different config file:
 
@@ -88,7 +101,7 @@ cargo run -- --config path/to/rocoon.toml
 Environment overrides:
 
 ```bash
-COCOON_PROXY_ADDR=91.108.4.11:8888 COCOON_OWNER_ADDRESS=<owner-wallet-address> COCOON_NODE_WALLET_KEY=... COCOON_CLIENT_SECRET=... cargo run
+COCOON_PROXY_ADDR=91.108.4.11:8888 COCOON_OWNER_ADDRESS=<owner-wallet-address> COCOON_NODE_WALLET_KEY=... COCOON_CLIENT_SECRET=... ROCOON_TON_READONLY_ENABLED=true cargo run
 ```
 
 API:
@@ -104,8 +117,9 @@ curl http://127.0.0.1:9999/v1/chat/completions \
 `/stats` returns locally observed request counters, token usage from Cocoon
 `final_info`, worker response `usage.total_cost`, proxy/debug strings from the
 last request, proxy connection metadata, and the derived Cocoon wallet address.
-TON wallet balance and seqno are currently `null` because Rust does not poll the
-chain yet.
+When `[ton].readonly_enabled` is true, it also returns read-only TON wallet
+balance, seqno, account state, last transaction logical time, and masterchain
+seqno.
 
 When the proxy returns `auth: short`, `rocoon` uses `client.secret` or
 `COCOON_CLIENT_SECRET` to call `client.authorizeWithProxyShort`.
