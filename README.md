@@ -61,7 +61,7 @@ connect_timeout_secs = 5
 listen_addr = "127.0.0.1:9999"
 
 [client]
-owner_address = "UQA9iqwh-HWRz20_M4h5idcVcVesVHL6KVeaaJdCU5Ydq2Bi"
+owner_address = "<cocoon-client-contract-address>"
 secret = ""
 min_config_version = 0
 
@@ -83,7 +83,7 @@ cargo run -- --config path/to/rocoon.toml
 Environment overrides:
 
 ```bash
-COCOON_PROXY_ADDR=91.108.4.11:8888 COCOON_OWNER_ADDRESS=UQ... COCOON_CLIENT_SECRET=... cargo run
+COCOON_PROXY_ADDR=91.108.4.11:8888 COCOON_OWNER_ADDRESS=<cocoon-client-contract-address> COCOON_CLIENT_SECRET=... cargo run
 ```
 
 API:

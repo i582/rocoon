@@ -17,7 +17,6 @@ use serde::Deserialize;
 
 const DEFAULT_CONFIG_PATH: &str = "rocoon.toml";
 const DEFAULT_PROXY_ADDR: &str = "91.108.4.11:8888";
-const DEFAULT_OWNER_ADDRESS: &str = "UQD5MEMHNCHR-zkATB3elGUvRfNiZAlK_luIj0matDI1xH_H";
 const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 5;
 
 /// Validated configuration used by networking, Cocoon auth, and the HTTP API.
@@ -74,7 +73,7 @@ struct ServerConfig {
 }
 
 /// Cocoon client identity and authorization TOML section.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct ClientConfig {
     owner_address: String,
@@ -168,16 +167,6 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             listen_addr: "127.0.0.1:9999".to_string(),
-        }
-    }
-}
-
-impl Default for ClientConfig {
-    fn default() -> Self {
-        Self {
-            owner_address: DEFAULT_OWNER_ADDRESS.to_string(),
-            secret: None,
-            min_config_version: 0,
         }
     }
 }
