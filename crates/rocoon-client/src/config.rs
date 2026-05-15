@@ -224,6 +224,10 @@ impl RuntimeConfig {
                 .mainnet
                 .then_some(DEFAULT_MAINNET_ROOT_CONTRACT_ADDRESS.to_string())
         });
+        let ton_config_path = config
+            .ton
+            .config_path
+            .map(|path| resolve_path_relative_to_config(path, &config_path));
 
         Ok(Self {
             config_path,
@@ -241,7 +245,7 @@ impl RuntimeConfig {
             ton: TonRuntimeConfig {
                 readonly_enabled: config.ton.readonly_enabled,
                 mainnet: config.ton.mainnet,
-                config_path: config.ton.config_path,
+                config_path: ton_config_path,
                 root_contract_address,
                 query_timeout_millis: config.ton.query_timeout_millis,
             },
@@ -344,6 +348,17 @@ fn read_config(path: &Path, explicit: bool) -> Result<FileConfig> {
     }
 }
 
+fn resolve_path_relative_to_config(path: PathBuf, config_path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path;
+    }
+    let config_dir = config_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    config_dir.join(path)
+}
+
 /// Parses environment booleans accepted by common service managers and shells.
 fn parse_bool(value: &str) -> Result<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
@@ -396,4 +411,32 @@ fn validate(config: &FileConfig) -> Result<()> {
         anyhow::bail!("ton.query_timeout_millis must be greater than zero");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_path_relative_to_config;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn relative_ton_config_path_is_resolved_against_config_file_dir() {
+        let resolved = resolve_path_relative_to_config(
+            PathBuf::from("spec/mainnet-full-ton-config.json"),
+            Path::new("/tmp/rocoon/rocoon.toml"),
+        );
+
+        assert_eq!(
+            resolved,
+            PathBuf::from("/tmp/rocoon/spec/mainnet-full-ton-config.json")
+        );
+    }
+
+    #[test]
+    fn absolute_ton_config_path_is_left_unchanged() {
+        let path = PathBuf::from("/tmp/mainnet-full-ton-config.json");
+        let resolved =
+            resolve_path_relative_to_config(path.clone(), Path::new("/tmp/rocoon/rocoon.toml"));
+
+        assert_eq!(resolved, path);
+    }
 }

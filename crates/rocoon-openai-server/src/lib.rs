@@ -10,7 +10,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
@@ -22,6 +22,7 @@ use stats::{CompletionFailure, CompletionSuccess, ServerStats};
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
+const MAINTENANCE_TICK_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Default per-request limits used when an HTTP request omits them.
 #[derive(Clone, Copy)]
@@ -83,6 +84,7 @@ pub fn serve(listen_addr: &str, client: CocoonClient, defaults: Defaults) -> Res
         client: Mutex::new(client),
         stats: Mutex::new(ServerStats::default()),
     });
+    spawn_maintenance_thread(Arc::clone(&state));
     for stream in listener.incoming() {
         let stream = stream.context("accept HTTP connection")?;
         let state = Arc::clone(&state);
@@ -97,6 +99,21 @@ pub fn serve(listen_addr: &str, client: CocoonClient, defaults: Defaults) -> Res
         });
     }
     Ok(())
+}
+
+fn spawn_maintenance_thread(state: Arc<ServerState>) {
+    thread::spawn(move || {
+        loop {
+            thread::sleep(MAINTENANCE_TICK_INTERVAL);
+            match state.client.lock() {
+                Ok(mut client) => client.maintenance_tick(),
+                Err(error) => {
+                    eprintln!("Cocoon client mutex poisoned in maintenance thread: {error}");
+                    return;
+                }
+            }
+        }
+    });
 }
 
 /// Handles one accepted HTTP connection.

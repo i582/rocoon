@@ -108,6 +108,17 @@ struct ClientAuthorizeWithProxyShort<'a> {
 #[tl(boxed, id = 0xd3474303)]
 struct ClientAuthorizeWithProxyLong;
 
+/// TL request for the latest proxy-side client payment status.
+///
+/// Source TL:
+///
+/// ```tl
+/// client.updatePaymentStatus = client.PaymentStatus;
+/// ```
+#[derive(Debug, TlWrite)]
+#[tl(boxed, id = 0x9ed1c697)]
+struct ClientUpdatePaymentStatus;
+
 /// TL request for model and worker discovery.
 ///
 /// Source TL:
@@ -355,6 +366,25 @@ pub enum AuthorizationWithProxy<'tl> {
     Failed { error_code: i32, error: &'tl [u8] },
 }
 
+/// Response object for `client.updatePaymentStatus`.
+///
+/// Source TL:
+///
+/// ```tl
+/// client.paymentStatus
+///     signed_payment:proxy.SignedPayment
+///     db_tokens:long
+///     max_tokens:long
+///     = client.PaymentStatus;
+/// ```
+#[derive(Debug, TlRead)]
+#[tl(boxed, id = 0xaa8a0ecc)]
+pub struct PaymentStatus<'tl> {
+    pub signed_payment: SignedPayment<'tl>,
+    pub db_tokens: i64,
+    pub max_tokens: i64,
+}
+
 /// Response object for `client.getWorkerTypesV2`.
 ///
 /// Source TL:
@@ -564,6 +594,12 @@ pub fn encode_authorize_with_proxy_long() -> Vec<u8> {
     tl_proto::serialize(ClientAuthorizeWithProxyLong)
 }
 
+/// Encodes `client.updatePaymentStatus`.
+#[must_use]
+pub fn encode_update_payment_status() -> Vec<u8> {
+    tl_proto::serialize(ClientUpdatePaymentStatus)
+}
+
 /// Encodes `client.getWorkerTypesV2`.
 #[must_use]
 pub fn encode_get_worker_types_v2() -> Vec<u8> {
@@ -643,6 +679,16 @@ pub fn decode_authorization_with_proxy(raw: &[u8]) -> Result<AuthorizationWithPr
         .context("decode client.authorizationWithProxy")
 }
 
+/// Decodes `client.PaymentStatus`.
+///
+/// # Errors
+///
+/// Returns an error when `raw` is not a valid boxed `client.paymentStatus` TL
+/// object.
+pub fn decode_payment_status(raw: &[u8]) -> Result<PaymentStatus<'_>> {
+    tl_proto::deserialize::<PaymentStatus>(raw).context("decode client.paymentStatus")
+}
+
 /// Decodes `client.workerTypesV2`.
 ///
 /// # Errors
@@ -680,12 +726,19 @@ fn write_raw_f64<P: tl_proto::TlPacket>(value: &f64, packet: &mut P) {
 
 #[cfg(test)]
 mod tests {
-    use super::encode_authorize_with_proxy_long;
+    use super::{encode_authorize_with_proxy_long, encode_update_payment_status};
 
     #[test]
     fn authorize_with_proxy_long_uses_cocoon_constructor_id() {
         let payload = encode_authorize_with_proxy_long();
 
         assert_eq!(&payload[..4], &0xd347_4303_u32.to_le_bytes());
+    }
+
+    #[test]
+    fn update_payment_status_uses_cocoon_constructor_id() {
+        let payload = encode_update_payment_status();
+
+        assert_eq!(&payload[..4], &0x9ed1_c697_u32.to_le_bytes());
     }
 }

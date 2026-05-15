@@ -22,6 +22,7 @@ use ton::block_tlb::{
     AccountState, CommonMsgInfo, CommonMsgInfoExtIn, CommonMsgInfoInt, CurrencyCollection,
     MaybeAccount, Msg, StateInit,
 };
+use ton::errors::TonError;
 use ton::lite_client::{LiteClient, LiteReqParams};
 use ton::ton_core::cell::{CellBuilder, CellParser, TonCell};
 use ton::ton_core::traits::tlb::TLB;
@@ -29,14 +30,17 @@ use ton::ton_core::types::TonAddress;
 use ton::ton_core::types::tlb_core::{
     EitherRefLayout, MsgAddress, MsgAddressExt, TLBCoins, TLBEitherRef,
 };
+use ton_core::errors::TonCoreError;
 
 use crate::{config::TonRuntimeConfig, wallet};
 
 const OWNER_CLIENT_REGISTER: u32 = 0xc45f_9f3b;
+const EXT_CLIENT_TOP_UP: u32 = 0xf172_e6c2;
 pub const CONTROL_MESSAGE_VALUE_NANOTONS: u64 = 700_000_000;
 const ACTIVE_CLIENT_REGISTER_VALUE_NANOTONS: u64 = 1_000_000_000;
-pub const CLIENT_REGISTER_EXTRA_NANOTONS: u64 = 50_000_000;
+const CLIENT_TOP_UP_EXTRA_NANOTONS: u64 = 700_000_000;
 pub const COCOON_WALLET_RESERVE_NANOTONS: u64 = 100_000_000;
+pub const COCOON_WALLET_MIN_BALANCE_NANOTONS: u64 = 2_100_000_000;
 const LEGACY_MIN_STAKE_NANOTONS: u64 = 1_000_000_000;
 const WALLET_FORWARD_MODE: u8 = 0;
 const WALLET_EXTERNAL_VALIDITY_SECS: u64 = 3_600;
@@ -153,6 +157,24 @@ pub struct TonClientRegisterRequest<'a> {
     pub wallet_seed: &'a [u8; 32],
 }
 
+/// Inputs needed to top up the client contract request balance.
+///
+/// C++ sends `ext_client_top_up` separately from long authorization register:
+/// register only links the client contract to the proxy, while top-up funds the
+/// balance that the proxy later converts into usable request tokens.
+pub struct TonClientTopUpRequest<'a> {
+    /// External owner wallet address used to build Cocoon wallet state init.
+    pub wallet_owner_address: &'a str,
+    /// Cocoon wallet contract address.
+    pub wallet_address: &'a str,
+    /// Mainnet/testnet Cocoon root contract address.
+    pub root_contract_address: &'a str,
+    /// Client contract address returned by `client.connectToProxy`.
+    pub client_contract_address: &'a str,
+    /// Ed25519 seed used by the Cocoon wallet contract.
+    pub wallet_seed: &'a [u8; 32],
+}
+
 /// Inputs needed to send value from the Cocoon wallet to a TON address.
 pub struct TonWalletTransferRequest<'a> {
     /// External owner wallet address used to build Cocoon wallet state init.
@@ -211,6 +233,25 @@ pub struct TonClientRegisterPreparedMessage {
     pub external_message: Vec<u8>,
 }
 
+/// Signed external message prepared for client contract top-up.
+#[derive(Clone, Debug)]
+pub struct TonClientTopUpPreparedMessage {
+    /// Random query id embedded into `ext_client_top_up`.
+    pub query_id: u64,
+    /// Cocoon wallet seqno used for signing.
+    pub wallet_seqno: u32,
+    /// Amount added to the client request balance, in nanotons.
+    pub top_up_amount: u64,
+    /// Attached internal message value in nanotons.
+    pub attached_value: u64,
+    /// Destination client contract address.
+    pub client_contract_address: String,
+    /// Cocoon wallet address that signed the external message.
+    pub wallet_address: String,
+    /// Full TON external message BOC.
+    pub external_message: Vec<u8>,
+}
+
 /// Signed external message prepared for a plain Cocoon wallet transfer.
 #[derive(Clone, Debug)]
 pub struct TonWalletTransferPreparedMessage {
@@ -254,6 +295,25 @@ pub struct TonClientRegisterResult {
     pub nonce: u64,
     /// Cocoon wallet seqno used for signing.
     pub wallet_seqno: u32,
+    /// Attached internal message value in nanotons.
+    pub attached_value: u64,
+    /// Liteserver send status returned by `liteServer.sendMessage`.
+    pub send_status: u32,
+    /// Destination client contract address.
+    pub client_contract_address: String,
+    /// Cocoon wallet address that signed the external message.
+    pub wallet_address: String,
+}
+
+/// Result returned after client contract top-up is accepted by a liteserver.
+#[derive(Clone, Debug)]
+pub struct TonClientTopUpResult {
+    /// Random query id embedded into `ext_client_top_up`.
+    pub query_id: u64,
+    /// Cocoon wallet seqno used for signing.
+    pub wallet_seqno: u32,
+    /// Amount added to the client request balance, in nanotons.
+    pub top_up_amount: u64,
     /// Attached internal message value in nanotons.
     pub attached_value: u64,
     /// Liteserver send status returned by `liteServer.sendMessage`.
@@ -423,8 +483,7 @@ impl TonReadonlyClient {
             .context("fetch TON state for long authorization")?;
         let client_contract_needs_state_init =
             context.client_contract.account_state != TonAccountState::Active;
-        let attached_value =
-            client_register_attached_value(&context.root_config, client_contract_needs_state_init)?;
+        let attached_value = client_register_attached_value();
         let wallet_seqno = validate_cocoon_wallet_can_send_value(
             request.wallet_address,
             &context.wallet,
@@ -481,6 +540,81 @@ impl TonReadonlyClient {
             wallet_address: request.wallet_address.to_string(),
             external_message: external_msg,
         })
+    }
+
+    /// Fetches wallet/root/client state, then builds and signs a top-up if needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if TON state cannot be fetched, the client contract is
+    /// not active, the Cocoon wallet is underfunded, or serialization fails.
+    pub fn prepare_client_top_up_message(
+        &self,
+        request: &TonClientTopUpRequest<'_>,
+    ) -> Result<Option<TonClientTopUpPreparedMessage>> {
+        let wallet_owner_address = TonAddress::from_str(request.wallet_owner_address)
+            .context("parse Cocoon wallet owner address")?;
+        let wallet_address =
+            TonAddress::from_str(request.wallet_address).context("parse Cocoon wallet address")?;
+        let root_contract_address = TonAddress::from_str(request.root_contract_address)
+            .context("parse Cocoon root contract address")?;
+        let client_contract_address = TonAddress::from_str(request.client_contract_address)
+            .context("parse Cocoon client contract address")?;
+
+        let context = self
+            .runtime
+            .block_on(self.fetch_client_register_context(
+                &wallet_address,
+                &root_contract_address,
+                &client_contract_address,
+            ))
+            .context("fetch TON state for client top-up")?;
+        if context.client_contract.account_state != TonAccountState::Active {
+            anyhow::bail!(
+                "Cocoon client contract is not active for top-up: {}",
+                context.client_contract.account_state.as_str()
+            );
+        }
+
+        let Some(top_up_amount) = client_top_up_amount(&context)? else {
+            return Ok(None);
+        };
+        let attached_value = top_up_amount
+            .checked_add(CLIENT_TOP_UP_EXTRA_NANOTONS)
+            .context("client top-up attached value overflow")?;
+        let wallet_seqno = validate_cocoon_wallet_can_send_value(
+            request.wallet_address,
+            &context.wallet,
+            attached_value,
+        )?;
+
+        let query_id = random_query_id();
+        let client_body = build_client_top_up_body(top_up_amount, query_id, &wallet_address)
+            .context("build client contract top-up body")?;
+        let internal_msg =
+            build_internal_message(&client_contract_address, attached_value, client_body);
+        let internal_msg_cell = internal_msg
+            .to_cell()
+            .context("serialize wallet-forwarded client top-up message")?;
+
+        let external_msg = build_wallet_external_message(
+            &wallet_address,
+            &wallet_owner_address,
+            request.wallet_seed,
+            wallet_seqno,
+            internal_msg_cell,
+        )
+        .context("build signed Cocoon wallet client top-up message")?;
+
+        Ok(Some(TonClientTopUpPreparedMessage {
+            query_id,
+            wallet_seqno,
+            top_up_amount,
+            attached_value,
+            client_contract_address: request.client_contract_address.to_string(),
+            wallet_address: request.wallet_address.to_string(),
+            external_message: external_msg,
+        }))
     }
 
     /// Builds and signs one plain TON transfer from the Cocoon wallet.
@@ -572,6 +706,27 @@ impl TonReadonlyClient {
         })
     }
 
+    /// Sends a previously prepared client top-up message.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the liteserver rejects `sendMessage`.
+    pub fn send_prepared_client_top_up_message(
+        &self,
+        message: &TonClientTopUpPreparedMessage,
+    ) -> Result<TonClientTopUpResult> {
+        let send_status = self.send_raw_message(&message.external_message)?;
+        Ok(TonClientTopUpResult {
+            query_id: message.query_id,
+            wallet_seqno: message.wallet_seqno,
+            top_up_amount: message.top_up_amount,
+            attached_value: message.attached_value,
+            send_status,
+            client_contract_address: message.client_contract_address.clone(),
+            wallet_address: message.wallet_address.clone(),
+        })
+    }
+
     /// Sends a previously prepared Cocoon wallet transfer.
     ///
     /// # Errors
@@ -616,20 +771,14 @@ impl TonReadonlyClient {
             .await
             .context("get TON masterchain info")?;
         let account = self
-            .client
-            .get_account_state(
-                wallet_address,
-                masterchain.last.seqno,
-                Some(self.req_params),
-            )
+            .get_account_state_allowing_empty(wallet_address, masterchain.last.seqno)
             .await
             .context("get Cocoon wallet account state")?;
         let wallet =
             TonWalletSnapshot::from_account(&account).context("parse Cocoon wallet account")?;
         let client_contract = if let Some(address) = client_contract_address {
             let account = self
-                .client
-                .get_account_state(address, masterchain.last.seqno, Some(self.req_params))
+                .get_account_state_allowing_empty(address, masterchain.last.seqno)
                 .await
                 .context("get Cocoon client contract account state")?;
             Some(
@@ -661,30 +810,15 @@ impl TonReadonlyClient {
             .await
             .context("get TON masterchain info")?;
         let wallet_account = self
-            .client
-            .get_account_state(
-                wallet_address,
-                masterchain.last.seqno,
-                Some(self.req_params),
-            )
+            .get_account_state_allowing_empty(wallet_address, masterchain.last.seqno)
             .await
             .context("get Cocoon wallet account state")?;
         let root_account = self
-            .client
-            .get_account_state(
-                root_contract_address,
-                masterchain.last.seqno,
-                Some(self.req_params),
-            )
+            .get_account_state_allowing_empty(root_contract_address, masterchain.last.seqno)
             .await
             .context("get Cocoon root contract account state")?;
         let client_contract_account = self
-            .client
-            .get_account_state(
-                client_contract_address,
-                masterchain.last.seqno,
-                Some(self.req_params),
-            )
+            .get_account_state_allowing_empty(client_contract_address, masterchain.last.seqno)
             .await
             .context("get Cocoon client contract account state")?;
         Ok(ClientRegisterContext {
@@ -695,6 +829,22 @@ impl TonReadonlyClient {
             client_contract: ClientContractSnapshot::from_account(&client_contract_account)
                 .context("parse Cocoon client contract account")?,
         })
+    }
+
+    async fn get_account_state_allowing_empty(
+        &self,
+        address: &TonAddress,
+        masterchain_seqno: u32,
+    ) -> Result<MaybeAccount> {
+        match self
+            .client
+            .get_account_state(address, masterchain_seqno, Some(self.req_params))
+            .await
+        {
+            Ok(account) => Ok(account),
+            Err(error) if is_empty_account_boc_error(&error) => Ok(MaybeAccount::default()),
+            Err(error) => Err(error.into()),
+        }
     }
 }
 
@@ -728,11 +878,7 @@ impl TonWalletSnapshot {
     fn from_account(account: &MaybeAccount) -> Result<Self> {
         let state = account_state(account);
         Ok(Self {
-            balance: account
-                .get_balance()
-                .map(ton::ton_core::types::tlb_core::TLBCoins::to_u64)
-                .transpose()
-                .context("convert wallet balance to u64 nanotons")?,
+            balance: wallet_balance(account)?,
             seqno: read_cocoon_wallet_seqno(account.get_data())?,
             state,
             last_tx_lt: last_tx_lt(account),
@@ -833,6 +979,7 @@ struct ClientRegisterContext {
 
 struct CocoonRootConfig {
     min_client_stake: u64,
+    price_per_token: u64,
     client_sc_code: TonCell,
     client_params_cell: TonCell,
 }
@@ -910,6 +1057,7 @@ fn parse_root_config_from_data(data: &TonCell) -> Result<CocoonRootConfig> {
 
     Ok(CocoonRootConfig {
         min_client_stake: root_params.min_client_stake,
+        price_per_token: root_params.price_per_token,
         client_sc_code,
         client_params_cell,
     })
@@ -1111,18 +1259,8 @@ fn write_coins(builder: &mut CellBuilder, value: u64) -> Result<()> {
         .context("write coins")
 }
 
-fn client_register_attached_value(
-    root_config: &CocoonRootConfig,
-    needs_state_init: bool,
-) -> Result<u64> {
-    if needs_state_init {
-        root_config
-            .min_client_stake
-            .checked_add(CLIENT_REGISTER_EXTRA_NANOTONS)
-            .context("client register attached value overflow")
-    } else {
-        Ok(ACTIVE_CLIENT_REGISTER_VALUE_NANOTONS)
-    }
+const fn client_register_attached_value() -> u64 {
+    ACTIVE_CLIENT_REGISTER_VALUE_NANOTONS
 }
 
 fn validate_cocoon_wallet_can_send_value(
@@ -1134,8 +1272,8 @@ fn validate_cocoon_wallet_can_send_value(
         TonAccountState::Active => snapshot
             .seqno
             .context("Cocoon wallet seqno is unavailable in active account")?,
-        TonAccountState::Uninit => 0,
-        TonAccountState::None | TonAccountState::Frozen => {
+        TonAccountState::None | TonAccountState::Uninit => 0,
+        TonAccountState::Frozen => {
             anyhow::bail!(
                 "Cocoon wallet account cannot send messages: {}",
                 snapshot.state.as_str()
@@ -1145,10 +1283,12 @@ fn validate_cocoon_wallet_can_send_value(
     let balance = snapshot
         .balance
         .context("Cocoon wallet balance is unavailable")?;
-    let required_balance = value_nanotons.saturating_add(COCOON_WALLET_RESERVE_NANOTONS);
+    let required_for_message = value_nanotons.saturating_add(COCOON_WALLET_RESERVE_NANOTONS);
+    let required_balance = required_for_message.max(COCOON_WALLET_MIN_BALANCE_NANOTONS);
     if balance < required_balance {
+        let missing_balance = required_balance - balance;
         anyhow::bail!(
-            "ACTION REQUIRED: BALANCE ON CONTRACT {wallet_address} IS TOO LOW: SENDING MESSAGE OF VALUE {value_nanotons} CURRENT {balance}"
+            "ACTION REQUIRED: Cocoon wallet {wallet_address} balance is too low: current={balance} nanotons, required={required_balance} nanotons, missing={missing_balance} nanotons. Required balance is max(message value {value_nanotons} + reserve {COCOON_WALLET_RESERVE_NANOTONS}, minimum wallet balance {COCOON_WALLET_MIN_BALANCE_NANOTONS}). Top up the Cocoon wallet before retrying."
         );
     }
     Ok(wallet_seqno)
@@ -1172,6 +1312,25 @@ fn account_state(account: &MaybeAccount) -> TonAccountState {
             AccountState::Active(_) => TonAccountState::Active,
         },
     }
+}
+
+fn wallet_balance(account: &MaybeAccount) -> Result<Option<u64>> {
+    match account {
+        MaybeAccount::None(_) => Ok(Some(0)),
+        MaybeAccount::Account(_) => account
+            .get_balance()
+            .map(ton::ton_core::types::tlb_core::TLBCoins::to_u64)
+            .transpose()
+            .context("convert wallet balance to u64 nanotons"),
+    }
+}
+
+fn is_empty_account_boc_error(error: &TonError) -> bool {
+    matches!(
+        error,
+        TonError::TLCoreError(TonCoreError::DataError { msg, .. })
+            if msg.contains("Can't read BOC from empty slice")
+    )
 }
 
 fn last_tx_lt(account: &MaybeAccount) -> Option<u64> {
@@ -1204,6 +1363,46 @@ fn build_client_register_body(
     builder
         .build()
         .context("build client contract register body cell")
+}
+
+fn build_client_top_up_body(
+    top_up_amount: u64,
+    query_id: u64,
+    wallet_address: &TonAddress,
+) -> Result<TonCell> {
+    let mut builder = TonCell::builder();
+    builder.write_num(&EXT_CLIENT_TOP_UP, 32)?;
+    builder.write_num(&query_id, 64)?;
+    write_coins(&mut builder, top_up_amount)?;
+    wallet_address.to_msg_address_int().write(&mut builder)?;
+    builder
+        .build()
+        .context("build client contract top-up body cell")
+}
+
+fn client_top_up_amount(context: &ClientRegisterContext) -> Result<Option<u64>> {
+    let stake = context
+        .client_contract
+        .stake
+        .unwrap_or(context.root_config.min_client_stake);
+    if context.root_config.price_per_token == 0 {
+        return Ok(None);
+    }
+    let balance = context
+        .client_contract
+        .balance
+        .context("Cocoon client contract request balance is unavailable")?;
+    let available_tokens = balance / context.root_config.price_per_token;
+    let stake_tokens = stake / context.root_config.price_per_token;
+    if available_tokens >= stake_tokens / 2 {
+        return Ok(None);
+    }
+
+    let rounded = stake - stake % context.root_config.price_per_token;
+    if rounded == 0 {
+        anyhow::bail!("client top-up amount rounded to zero");
+    }
+    Ok(Some(rounded))
 }
 
 fn build_client_contract_state_init(
@@ -1340,14 +1539,17 @@ fn valid_until() -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ACTIVE_CLIENT_REGISTER_VALUE_NANOTONS, CLIENT_REGISTER_EXTRA_NANOTONS,
-        OWNER_CLIENT_REGISTER, TonControlAction, build_client_control_body,
-        build_client_register_body, build_wallet_external_message, client_register_attached_value,
-        read_cocoon_wallet_seqno,
+        ACTIVE_CLIENT_REGISTER_VALUE_NANOTONS, CLIENT_TOP_UP_EXTRA_NANOTONS,
+        COCOON_WALLET_MIN_BALANCE_NANOTONS, COCOON_WALLET_RESERVE_NANOTONS,
+        CONTROL_MESSAGE_VALUE_NANOTONS, ClientContractSnapshot, ClientRegisterContext,
+        CocoonRootConfig, EXT_CLIENT_TOP_UP, OWNER_CLIENT_REGISTER, TonAccountState,
+        TonControlAction, TonWalletSnapshot, build_client_control_body, build_client_register_body,
+        build_client_top_up_body, build_wallet_external_message, client_register_attached_value,
+        client_top_up_amount, read_cocoon_wallet_seqno, validate_cocoon_wallet_can_send_value,
     };
     use rocoon_contract::OWNER_CLIENT_WITHDRAW;
     use std::str::FromStr;
-    use ton::block_tlb::Msg;
+    use ton::block_tlb::{MaybeAccount, Msg};
     use ton::ton_core::cell::TonCell;
     use ton::ton_core::traits::tlb::TLB;
     use ton::ton_core::types::TonAddress;
@@ -1388,21 +1590,94 @@ mod tests {
     }
 
     #[test]
-    fn client_register_value_depends_on_state_init() -> anyhow::Result<()> {
-        let root_config = super::CocoonRootConfig {
-            min_client_stake: 15_000_000_000,
-            client_sc_code: TonCell::empty().to_owned(),
-            client_params_cell: TonCell::empty().to_owned(),
-        };
-
+    fn client_register_value_matches_cpp_long_auth_register() {
         assert_eq!(
-            client_register_attached_value(&root_config, true)?,
-            root_config.min_client_stake + CLIENT_REGISTER_EXTRA_NANOTONS
-        );
-        assert_eq!(
-            client_register_attached_value(&root_config, false)?,
+            client_register_attached_value(),
             ACTIVE_CLIENT_REGISTER_VALUE_NANOTONS
         );
+    }
+
+    #[test]
+    fn client_top_up_body_matches_cpp_layout() -> anyhow::Result<()> {
+        let wallet = TonAddress::from_str("UQA9iqwh-HWRz20_M4h5idcVcVesVHL6KVeaaJdCU5Ydq2Bi")?;
+        let cell = build_client_top_up_body(15_000_000_000, 42, &wallet)?;
+        let mut parser = cell.parser();
+
+        assert_eq!(parser.read_num::<u32>(32)?, EXT_CLIENT_TOP_UP);
+        assert_eq!(parser.read_num::<u64>(64)?, 42);
+        assert_eq!(
+            ton::ton_core::types::tlb_core::TLBCoins::read(&mut parser)?.to_u64()?,
+            15_000_000_000
+        );
+        assert_eq!(TonAddress::read(&mut parser)?, wallet);
+        parser.ensure_empty()?;
+        Ok(())
+    }
+
+    #[test]
+    fn client_top_up_amount_matches_cpp_threshold() -> anyhow::Result<()> {
+        let empty_context = client_register_context(0, 15_000_000_000, 20);
+        assert_eq!(client_top_up_amount(&empty_context)?, Some(15_000_000_000));
+
+        let half_funded_context = client_register_context(7_500_000_000, 15_000_000_000, 20);
+        assert_eq!(client_top_up_amount(&half_funded_context)?, None);
+
+        let no_price_context = client_register_context(0, 15_000_000_000, 0);
+        assert_eq!(client_top_up_amount(&no_price_context)?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn client_top_up_attaches_cpp_extra_value() {
+        assert_eq!(CLIENT_TOP_UP_EXTRA_NANOTONS, CONTROL_MESSAGE_VALUE_NANOTONS);
+    }
+
+    #[test]
+    fn cocoon_wallet_send_balance_check_matches_cpp_minimum_and_reserve() -> anyhow::Result<()> {
+        let close_value = CONTROL_MESSAGE_VALUE_NANOTONS;
+        let low_control_wallet = active_wallet(COCOON_WALLET_MIN_BALANCE_NANOTONS - 1);
+        let error =
+            validate_cocoon_wallet_can_send_value("wallet", &low_control_wallet, close_value)
+                .expect_err("control message below C++ wallet minimum must be rejected");
+        assert!(error.to_string().contains("minimum wallet balance"));
+
+        let funded_control_wallet = active_wallet(COCOON_WALLET_MIN_BALANCE_NANOTONS);
+        assert_eq!(
+            validate_cocoon_wallet_can_send_value("wallet", &funded_control_wallet, close_value)?,
+            7
+        );
+
+        let top_up_value = 15_700_000_000;
+        let required_top_up_balance = top_up_value + COCOON_WALLET_RESERVE_NANOTONS;
+        let low_top_up_wallet = active_wallet(required_top_up_balance - 1);
+        assert!(
+            validate_cocoon_wallet_can_send_value("wallet", &low_top_up_wallet, top_up_value)
+                .is_err()
+        );
+
+        let funded_top_up_wallet = active_wallet(required_top_up_balance);
+        assert_eq!(
+            validate_cocoon_wallet_can_send_value("wallet", &funded_top_up_wallet, top_up_value)?,
+            7
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn missing_cocoon_wallet_account_is_reported_as_zero_balance() -> anyhow::Result<()> {
+        let wallet = TonWalletSnapshot::from_account(&MaybeAccount::default())?;
+
+        assert_eq!(wallet.state, TonAccountState::None);
+        assert_eq!(wallet.balance, Some(0));
+        assert_eq!(wallet.seqno, None);
+
+        let error = validate_cocoon_wallet_can_send_value(
+            "wallet",
+            &wallet,
+            CONTROL_MESSAGE_VALUE_NANOTONS,
+        )
+        .expect_err("missing wallet account must fail as underfunded");
+        assert!(error.to_string().contains("current=0 nanotons"));
         Ok(())
     }
 
@@ -1421,5 +1696,42 @@ mod tests {
         assert!(Msg::<TonCell>::from_boc(first_message)?.init.is_some());
         assert!(Msg::<TonCell>::from_boc(next_message)?.init.is_none());
         Ok(())
+    }
+
+    fn active_wallet(balance: u64) -> TonWalletSnapshot {
+        TonWalletSnapshot {
+            balance: Some(balance),
+            seqno: Some(7),
+            state: TonAccountState::Active,
+            last_tx_lt: Some(42),
+        }
+    }
+
+    fn client_register_context(
+        balance: u64,
+        stake: u64,
+        price_per_token: u64,
+    ) -> ClientRegisterContext {
+        ClientRegisterContext {
+            wallet: active_wallet(COCOON_WALLET_MIN_BALANCE_NANOTONS),
+            root_config: CocoonRootConfig {
+                min_client_stake: stake,
+                price_per_token,
+                client_sc_code: TonCell::empty().to_owned(),
+                client_params_cell: TonCell::empty().to_owned(),
+            },
+            client_contract: ClientContractSnapshot {
+                account_balance: Some(stake),
+                account_state: TonAccountState::Active,
+                last_tx_lt: Some(1),
+                state_raw: Some(0),
+                state: Some("running"),
+                balance: Some(balance),
+                stake: Some(stake),
+                tokens_used: Some(0),
+                unlock_ts: Some(0),
+                withdrawable_balance: Some(balance.saturating_sub(stake)),
+            },
+        }
     }
 }

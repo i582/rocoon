@@ -10,21 +10,28 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use rand::Rng;
 use sha2::{Digest, Sha256};
 
 use crate::config::{RuntimeConfig, TonRuntimeConfig};
 use crate::ton_readonly::{
-    COCOON_WALLET_RESERVE_NANOTONS, CONTROL_MESSAGE_VALUE_NANOTONS, ClientContractSnapshot,
-    TonAccountState, TonClientRegisterPreparedMessage, TonClientRegisterRequest,
-    TonClientRegisterResult, TonControlAction, TonControlPreparedMessage, TonControlRequest,
-    TonControlResult, TonReadonlyClient, TonReadonlySnapshot, TonWalletSnapshot,
-    TonWalletTransferPreparedMessage, TonWalletTransferRequest, TonWalletTransferResult,
+    COCOON_WALLET_MIN_BALANCE_NANOTONS, COCOON_WALLET_RESERVE_NANOTONS,
+    CONTROL_MESSAGE_VALUE_NANOTONS, ClientContractSnapshot, TonAccountState,
+    TonClientRegisterPreparedMessage, TonClientRegisterRequest, TonClientRegisterResult,
+    TonClientTopUpPreparedMessage, TonClientTopUpRequest, TonClientTopUpResult, TonControlAction,
+    TonControlPreparedMessage, TonControlRequest, TonControlResult, TonReadonlyClient,
+    TonReadonlySnapshot, TonWalletSnapshot, TonWalletTransferPreparedMessage,
+    TonWalletTransferRequest, TonWalletTransferResult,
 };
 use rocoon_protocol::{self as cocoon, RunQueryOptions, WorkerInstanceV2, WorkerTypeV2};
 use rocoon_transport::{QueryFinalInfo, RunQueryOutput, Session, pow, ratls};
 
 const CONTROL_RESEND_INTERVAL: Duration = Duration::from_secs(30);
 const AUTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+const BALANCE_CHECK_MIN_SECS: f64 = 1.0;
+const BALANCE_CHECK_MAX_SECS: f64 = 2.0;
+const PAYMENT_COMPARE_MIN_SECS: f64 = 10.0;
+const PAYMENT_COMPARE_MAX_SECS: f64 = 20.0;
 const COCOON_CLIENT_CONTRACT_STATE_CLOSED: u8 = 2;
 
 /// Authenticated Cocoon proxy client.
@@ -42,8 +49,11 @@ pub struct CocoonClient {
     ton_readonly: TonReadonlyState,
     config: RuntimeConfig,
     control_request: Option<PendingControlRequest>,
+    client_top_up_request: Option<PendingClientTopUpRequest>,
     wallet_transfer_request: Option<PendingWalletTransferRequest>,
     client_contract_close_confirmed: bool,
+    next_balance_check_at: Instant,
+    next_payment_compare_at: Instant,
 }
 
 /// Snapshot of local client state that can be exposed through `/stats`.
@@ -231,9 +241,36 @@ impl CocoonClient {
             ton_readonly,
             config: config.clone(),
             control_request: None,
+            client_top_up_request: None,
             wallet_transfer_request: None,
             client_contract_close_confirmed: false,
+            next_balance_check_at: Instant::now(),
+            next_payment_compare_at: Instant::now(),
         })
+    }
+
+    /// Runs the C++ client-runner style periodic maintenance.
+    ///
+    /// C++ does not top up during authorization. Its actor alarm periodically
+    /// refreshes client-contract state, decides whether a top-up is needed, and
+    /// separately asks the proxy for payment status. This method performs the
+    /// same checks for the synchronous Rust bridge.
+    pub fn maintenance_tick(&mut self) {
+        let now = Instant::now();
+        if now >= self.next_balance_check_at {
+            self.next_balance_check_at =
+                now + random_interval(BALANCE_CHECK_MIN_SECS, BALANCE_CHECK_MAX_SECS);
+            if let Err(error) = self.update_balances_and_check() {
+                eprintln!("balance check failed: {error:#}");
+            }
+        }
+        if now >= self.next_payment_compare_at {
+            self.next_payment_compare_at =
+                now + random_interval(PAYMENT_COMPARE_MIN_SECS, PAYMENT_COMPARE_MAX_SECS);
+            if let Err(error) = self.refresh_payment_status() {
+                eprintln!("payment compare failed: {error:#}");
+            }
+        }
     }
 
     /// Returns the locally known connection, wallet, and payment status.
@@ -243,6 +280,7 @@ impl CocoonClient {
             .snapshot(&self.config.cocoon_wallet_address, &self.client_sc_address);
         if let Some(client_contract) = &ton.client_contract {
             self.refresh_control_request(client_contract);
+            self.refresh_client_top_up_request(client_contract);
         }
         if let Some(wallet) = &ton.wallet {
             self.refresh_wallet_transfer_request(wallet);
@@ -258,6 +296,7 @@ impl CocoonClient {
             .as_ref()
             .map(PendingWalletTransferRequest::status);
         let wallet_active_transactions = usize::from(self.control_request.is_some())
+            .saturating_add(usize::from(self.client_top_up_request.is_some()))
             .saturating_add(usize::from(self.wallet_transfer_request.is_some()));
         ClientStatus {
             proxy_addr: self.config.proxy_addr.clone(),
@@ -281,7 +320,7 @@ impl CocoonClient {
             wallet_pending_transactions: 0,
             wallet_active_transactions,
             wallet_transfer,
-            sc_request_running: self.control_request.is_some(),
+            sc_request_running: self.sc_request_is_running(),
             sc_request: control_request,
             client_contract: ton.client_contract,
         }
@@ -320,10 +359,11 @@ impl CocoonClient {
             .as_ref()
             .context("client contract state is unavailable")?;
         self.refresh_control_request(client_contract);
+        self.refresh_client_top_up_request(client_contract);
         if let Some(wallet) = &ton.wallet {
             self.refresh_wallet_transfer_request(wallet);
         }
-        if self.control_request.is_some() || self.wallet_transfer_request.is_some() {
+        if self.wallet_transaction_is_running() {
             self.resend_pending_wallet_messages_if_due();
             anyhow::bail!("wallet transaction is already running");
         }
@@ -381,10 +421,11 @@ impl CocoonClient {
             .as_ref()
             .context("client contract state is unavailable")?;
         self.refresh_control_request(client_contract);
+        self.refresh_client_top_up_request(client_contract);
         if let Some(wallet) = &ton.wallet {
             self.refresh_wallet_transfer_request(wallet);
         }
-        if self.control_request.is_some() || self.wallet_transfer_request.is_some() {
+        if self.wallet_transaction_is_running() {
             self.resend_pending_wallet_messages_if_due();
             anyhow::bail!("wallet transaction is already running");
         }
@@ -497,13 +538,90 @@ impl CocoonClient {
     /// Replaces the current live session with a fresh authorized connection.
     fn reconnect(&mut self) -> Result<()> {
         let control_request = self.control_request.clone();
+        let client_top_up_request = self.client_top_up_request.clone();
         let wallet_transfer_request = self.wallet_transfer_request.clone();
         let client_contract_close_confirmed = self.client_contract_close_confirmed;
+        let next_balance_check_at = self.next_balance_check_at;
+        let next_payment_compare_at = self.next_payment_compare_at;
         let mut replacement = Self::connect(&self.config)?;
         replacement.control_request = control_request;
+        replacement.client_top_up_request = client_top_up_request;
         replacement.wallet_transfer_request = wallet_transfer_request;
         replacement.client_contract_close_confirmed = client_contract_close_confirmed;
+        replacement.next_balance_check_at = next_balance_check_at;
+        replacement.next_payment_compare_at = next_payment_compare_at;
         *self = replacement;
+        Ok(())
+    }
+
+    fn update_balances_and_check(&mut self) -> Result<()> {
+        let ton = self
+            .ton_readonly
+            .snapshot(&self.config.cocoon_wallet_address, &self.client_sc_address);
+        if !ton.ok {
+            anyhow::bail!(
+                "TON state is unavailable: {}",
+                ton.last_error.as_deref().unwrap_or("unknown error")
+            );
+        }
+        let client_contract = ton
+            .client_contract
+            .as_ref()
+            .context("client contract state is unavailable")?;
+        self.refresh_control_request(client_contract);
+        self.refresh_client_top_up_request(client_contract);
+        if let Some(wallet) = &ton.wallet {
+            self.refresh_wallet_transfer_request(wallet);
+        }
+        self.resend_pending_wallet_messages_if_due();
+        self.maybe_run_client_top_up(client_contract)
+    }
+
+    fn maybe_run_client_top_up(&mut self, client_contract: &ClientContractSnapshot) -> Result<()> {
+        if self.wallet_transaction_is_running()
+            || client_contract.account_state != TonAccountState::Active
+            || client_contract.state_raw.is_none()
+            || client_contract
+                .state_raw
+                .is_some_and(|state| state >= COCOON_CLIENT_CONTRACT_STATE_CLOSED)
+        {
+            return Ok(());
+        }
+        let Some(root_contract_address) = self.config.ton.root_contract_address.clone() else {
+            return Ok(());
+        };
+
+        let request = TonClientTopUpRequest {
+            wallet_owner_address: &self.config.owner_address,
+            wallet_address: &self.config.cocoon_wallet_address,
+            root_contract_address: &root_contract_address,
+            client_contract_address: &self.client_sc_address,
+            wallet_seed: self.config.node_wallet_key.seed(),
+        };
+        let Some(prepared) = self.ton_readonly.prepare_client_top_up(&request)? else {
+            return Ok(());
+        };
+        let result = self
+            .ton_readonly
+            .send_prepared_client_top_up(&prepared)
+            .context("send client top-up transaction")?;
+        println!(
+            "client top-up sent: wallet={} client_contract={} top_up={} value={} wallet_seqno={} query_id={} send_status={}",
+            result.wallet_address,
+            result.client_contract_address,
+            result.top_up_amount,
+            result.attached_value,
+            result.wallet_seqno,
+            result.query_id,
+            result.send_status
+        );
+        self.client_top_up_request =
+            Some(PendingClientTopUpRequest::new(&prepared, client_contract));
+        Ok(())
+    }
+
+    fn refresh_payment_status(&mut self) -> Result<()> {
+        self.payment_status = update_payment_status(&mut self.session)?;
         Ok(())
     }
 
@@ -522,6 +640,16 @@ impl CocoonClient {
         self.control_request = None;
     }
 
+    fn refresh_client_top_up_request(&mut self, client_contract: &ClientContractSnapshot) {
+        if self
+            .client_top_up_request
+            .as_ref()
+            .is_some_and(|request| request.is_completed_by(client_contract))
+        {
+            self.client_top_up_request = None;
+        }
+    }
+
     fn refresh_wallet_transfer_request(&mut self, wallet: &TonWalletSnapshot) {
         if self
             .wallet_transfer_request
@@ -534,6 +662,7 @@ impl CocoonClient {
 
     fn resend_pending_wallet_messages_if_due(&mut self) {
         self.resend_control_request_if_due();
+        self.resend_client_top_up_if_due();
         self.resend_wallet_transfer_if_due();
     }
 
@@ -565,6 +694,32 @@ impl CocoonClient {
         }
     }
 
+    fn resend_client_top_up_if_due(&mut self) {
+        let Some(request) = self.client_top_up_request.as_mut() else {
+            return;
+        };
+        if !request.is_resend_due() {
+            return;
+        }
+
+        let external_message = request.external_message.clone();
+        request.mark_resend_attempted();
+        match self.ton_readonly.resend_external_message(&external_message) {
+            Ok(send_status) => {
+                eprintln!(
+                    "resent Cocoon wallet client top-up: query_id={} wallet_seqno={} top_up={} send_status={send_status}",
+                    request.query_id, request.wallet_seqno, request.top_up_amount
+                );
+            }
+            Err(error) => {
+                eprintln!(
+                    "failed to resend Cocoon wallet client top-up: query_id={} wallet_seqno={} top_up={} error={error:#}",
+                    request.query_id, request.wallet_seqno, request.top_up_amount
+                );
+            }
+        }
+    }
+
     fn resend_wallet_transfer_if_due(&mut self) {
         let Some(request) = self.wallet_transfer_request.as_mut() else {
             return;
@@ -589,6 +744,14 @@ impl CocoonClient {
                 );
             }
         }
+    }
+
+    const fn sc_request_is_running(&self) -> bool {
+        self.control_request.is_some() || self.client_top_up_request.is_some()
+    }
+
+    const fn wallet_transaction_is_running(&self) -> bool {
+        self.sc_request_is_running() || self.wallet_transfer_request.is_some()
     }
 }
 
@@ -637,6 +800,53 @@ impl PendingControlRequest {
             && snapshot
                 .withdrawable_balance
                 .is_some_and(|current| current < before)
+        {
+            return true;
+        }
+        false
+    }
+
+    fn is_resend_due(&self) -> bool {
+        Instant::now() >= self.next_resend_at
+    }
+
+    fn mark_resend_attempted(&mut self) {
+        self.next_resend_at = Instant::now() + CONTROL_RESEND_INTERVAL;
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PendingClientTopUpRequest {
+    query_id: u64,
+    wallet_seqno: u32,
+    top_up_amount: u64,
+    request_balance_before: Option<u64>,
+    last_tx_lt_before: Option<u64>,
+    external_message: Vec<u8>,
+    next_resend_at: Instant,
+}
+
+impl PendingClientTopUpRequest {
+    fn new(message: &TonClientTopUpPreparedMessage, snapshot: &ClientContractSnapshot) -> Self {
+        Self {
+            query_id: message.query_id,
+            wallet_seqno: message.wallet_seqno,
+            top_up_amount: message.top_up_amount,
+            request_balance_before: snapshot.balance,
+            last_tx_lt_before: snapshot.last_tx_lt,
+            external_message: message.external_message.clone(),
+            next_resend_at: Instant::now() + CONTROL_RESEND_INTERVAL,
+        }
+    }
+
+    fn is_completed_by(&self, snapshot: &ClientContractSnapshot) -> bool {
+        if let Some(before) = self.last_tx_lt_before
+            && snapshot.last_tx_lt.is_some_and(|current| current > before)
+        {
+            return true;
+        }
+        if let Some(before) = self.request_balance_before
+            && snapshot.balance.is_some_and(|current| current > before)
         {
             return true;
         }
@@ -839,6 +1049,51 @@ impl TonReadonlyState {
         }
     }
 
+    fn prepare_client_top_up(
+        &mut self,
+        request: &TonClientTopUpRequest<'_>,
+    ) -> Result<Option<TonClientTopUpPreparedMessage>> {
+        match self {
+            Self::Disabled => anyhow::bail!("TON liteclient is disabled"),
+            Self::Failed { config, error } => {
+                eprintln!("TON liteclient is unavailable, reconnecting: {error}");
+                let config = config.clone();
+                match TonReadonlyClient::connect(&config) {
+                    Ok(client) => {
+                        *self = Self::Ready { config, client };
+                        self.prepare_client_top_up(request)
+                    }
+                    Err(reconnect_error) => {
+                        anyhow::bail!(
+                            "TON liteclient is unavailable: {error}; reconnect failed: {reconnect_error:#}"
+                        );
+                    }
+                }
+            }
+            Self::Ready { config, client } => match client.prepare_client_top_up_message(request) {
+                Ok(message) => Ok(message),
+                Err(first_error) => {
+                    eprintln!(
+                        "client top-up prepare failed, reconnecting liteclient: {first_error:#}"
+                    );
+                    match TonReadonlyClient::connect(config) {
+                        Ok(replacement) => {
+                            *client = replacement;
+                            client
+                                .prepare_client_top_up_message(request)
+                                .with_context(|| {
+                                    format!("{first_error:#}; retry after reconnect also failed")
+                                })
+                        }
+                        Err(reconnect_error) => {
+                            anyhow::bail!("{first_error:#}; reconnect failed: {reconnect_error:#}");
+                        }
+                    }
+                }
+            },
+        }
+    }
+
     fn send_prepared_client_register(
         &mut self,
         message: &TonClientRegisterPreparedMessage,
@@ -872,6 +1127,57 @@ impl TonReadonlyState {
                                 *client = replacement;
                                 client
                                     .send_prepared_client_register_message(message)
+                                    .with_context(|| {
+                                        format!(
+                                            "{first_error:#}; retry after reconnect also failed"
+                                        )
+                                    })
+                            }
+                            Err(reconnect_error) => {
+                                anyhow::bail!(
+                                    "{first_error:#}; reconnect failed: {reconnect_error:#}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn send_prepared_client_top_up(
+        &mut self,
+        message: &TonClientTopUpPreparedMessage,
+    ) -> Result<TonClientTopUpResult> {
+        match self {
+            Self::Disabled => anyhow::bail!("TON liteclient is disabled"),
+            Self::Failed { config, error } => {
+                eprintln!("TON liteclient is unavailable, reconnecting: {error}");
+                let config = config.clone();
+                match TonReadonlyClient::connect(&config) {
+                    Ok(client) => {
+                        *self = Self::Ready { config, client };
+                        self.send_prepared_client_top_up(message)
+                    }
+                    Err(reconnect_error) => {
+                        anyhow::bail!(
+                            "TON liteclient is unavailable: {error}; reconnect failed: {reconnect_error:#}"
+                        );
+                    }
+                }
+            }
+            Self::Ready { config, client } => {
+                match client.send_prepared_client_top_up_message(message) {
+                    Ok(result) => Ok(result),
+                    Err(first_error) => {
+                        eprintln!(
+                            "client top-up send failed, reconnecting liteclient: {first_error:#}"
+                        );
+                        match TonReadonlyClient::connect(config) {
+                            Ok(replacement) => {
+                                *client = replacement;
+                                client
+                                    .send_prepared_client_top_up_message(message)
                                     .with_context(|| {
                                         format!(
                                             "{first_error:#}; retry after reconnect also failed"
@@ -983,8 +1289,8 @@ fn validate_cocoon_wallet_can_send_value(
         TonAccountState::Active => snapshot
             .seqno
             .context("Cocoon wallet seqno is unavailable in active account")?,
-        TonAccountState::Uninit => 0,
-        TonAccountState::None | TonAccountState::Frozen => {
+        TonAccountState::None | TonAccountState::Uninit => 0,
+        TonAccountState::Frozen => {
             anyhow::bail!(
                 "Cocoon wallet account cannot send control messages: {}",
                 snapshot.state.as_str()
@@ -994,10 +1300,12 @@ fn validate_cocoon_wallet_can_send_value(
     let balance = snapshot
         .balance
         .context("Cocoon wallet balance is unavailable")?;
-    let required_balance = value_nanotons.saturating_add(COCOON_WALLET_RESERVE_NANOTONS);
+    let required_for_message = value_nanotons.saturating_add(COCOON_WALLET_RESERVE_NANOTONS);
+    let required_balance = required_for_message.max(COCOON_WALLET_MIN_BALANCE_NANOTONS);
     if balance < required_balance {
+        let missing_balance = required_balance - balance;
         anyhow::bail!(
-            "ACTION REQUIRED: BALANCE ON CONTRACT {wallet_address} IS TOO LOW: SENDING MESSAGE OF VALUE {value_nanotons} CURRENT {balance}"
+            "ACTION REQUIRED: Cocoon wallet {wallet_address} balance is too low: current={balance} nanotons, required={required_balance} nanotons, missing={missing_balance} nanotons. Required balance is max(message value {value_nanotons} + reserve {COCOON_WALLET_RESERVE_NANOTONS}, minimum wallet balance {COCOON_WALLET_MIN_BALANCE_NANOTONS}). Top up the Cocoon wallet before retrying."
         );
     }
     Ok(wallet_seqno)
@@ -1046,6 +1354,10 @@ const fn client_contract_state_name_for_error(state: u8) -> &'static str {
         2 => "closed",
         _ => "unknown",
     }
+}
+
+fn random_interval(min_secs: f64, max_secs: f64) -> Duration {
+    Duration::from_secs_f64(rand::thread_rng().gen_range(min_secs..max_secs))
 }
 
 /// Minimal HTTP headers required by Cocoon's internal HTTP request wrapper.
@@ -1196,6 +1508,19 @@ fn authorize_long(
     payment_status_from_auth(&auth)
 }
 
+fn update_payment_status(session: &mut Session<ratls::RatlsStream>) -> Result<AuthPaymentStatus> {
+    let request = cocoon::encode_update_payment_status();
+    let response = session
+        .make_request(&request)
+        .context("client.updatePaymentStatus")?;
+    let status = cocoon::decode_payment_status(&response)?;
+    Ok(payment_status_from_fields(
+        &status.signed_payment,
+        status.db_tokens,
+        status.max_tokens,
+    ))
+}
+
 /// Checks that the configured secret matches the proxy-provided challenge hash.
 fn secret_hash_matches(secret: &str, expected: &[u8; 32]) -> bool {
     let digest = Sha256::digest(secret.as_bytes());
@@ -1219,18 +1544,27 @@ fn payment_status_from_auth(
             println!(
                 "auth success: tokens_committed_to_db={tokens_committed_to_db} max_tokens={max_tokens}"
             );
-            Ok(AuthPaymentStatus {
-                signed_payment_available: matches!(
-                    signed_payment,
-                    cocoon::SignedPayment::Data { .. }
-                ),
-                tokens_committed_to_db: *tokens_committed_to_db,
-                max_tokens: *max_tokens,
-            })
+            Ok(payment_status_from_fields(
+                signed_payment,
+                *tokens_committed_to_db,
+                *max_tokens,
+            ))
         }
         cocoon::AuthorizationWithProxy::Failed { error_code, error } => {
             anyhow::bail!("auth failed: code={error_code} error={}", utf8(error)?)
         }
+    }
+}
+
+const fn payment_status_from_fields(
+    signed_payment: &cocoon::SignedPayment<'_>,
+    tokens_committed_to_db: i64,
+    max_tokens: i64,
+) -> AuthPaymentStatus {
+    AuthPaymentStatus {
+        signed_payment_available: matches!(signed_payment, cocoon::SignedPayment::Data { .. }),
+        tokens_committed_to_db,
+        max_tokens,
     }
 }
 
@@ -1312,6 +1646,15 @@ mod tests {
         }
     }
 
+    const fn none_wallet(balance: u64) -> TonWalletSnapshot {
+        TonWalletSnapshot {
+            balance: Some(balance),
+            seqno: None,
+            state: TonAccountState::None,
+            last_tx_lt: None,
+        }
+    }
+
     const fn active_client_contract(
         state_raw: u8,
         last_tx_lt: u64,
@@ -1355,10 +1698,12 @@ mod tests {
     }
 
     #[test]
-    fn control_send_requires_wallet_balance_plus_cocoon_reserve() -> Result<()> {
-        let required_balance = CONTROL_MESSAGE_VALUE_NANOTONS + COCOON_WALLET_RESERVE_NANOTONS;
+    fn control_send_requires_cocoon_wallet_min_balance() -> Result<()> {
+        let required_balance = COCOON_WALLET_MIN_BALANCE_NANOTONS;
         let low_wallet = active_wallet(required_balance - 1);
-        assert!(validate_cocoon_wallet_can_send_control("wallet", &low_wallet).is_err());
+        let error = validate_cocoon_wallet_can_send_control("wallet", &low_wallet)
+            .expect_err("wallet below the Cocoon minimum must be rejected");
+        assert!(error.to_string().contains("minimum wallet balance"));
 
         let funded_wallet = active_wallet(required_balance);
         assert_eq!(
@@ -1370,7 +1715,7 @@ mod tests {
 
     #[test]
     fn control_send_can_deploy_uninit_wallet_with_seqno_zero() -> Result<()> {
-        let required_balance = CONTROL_MESSAGE_VALUE_NANOTONS + COCOON_WALLET_RESERVE_NANOTONS;
+        let required_balance = COCOON_WALLET_MIN_BALANCE_NANOTONS;
         let wallet = uninit_wallet(required_balance);
 
         assert_eq!(
@@ -1378,6 +1723,17 @@ mod tests {
             0
         );
         Ok(())
+    }
+
+    #[test]
+    fn control_send_reports_low_balance_for_missing_wallet_account() {
+        let wallet = none_wallet(0);
+
+        let error = validate_cocoon_wallet_can_send_control("wallet", &wallet)
+            .expect_err("missing wallet account with zero balance must be rejected as underfunded");
+
+        assert!(error.to_string().contains("current=0 nanotons"));
+        assert!(error.to_string().contains("Top up the Cocoon wallet"));
     }
 
     #[test]

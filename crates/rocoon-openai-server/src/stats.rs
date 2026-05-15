@@ -166,7 +166,7 @@ impl ServerStats {
                 "signed_payment_available": client.payment_status.signed_payment_available,
                 "tokens_committed_to_db": client.payment_status.tokens_committed_to_db,
                 "max_tokens": client.payment_status.max_tokens,
-                "payment_status_endpoint_supported": false
+                "payment_status_endpoint_supported": true
             },
             "requests": {
                 "completion_started": self.completion_requests_started,
