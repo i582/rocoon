@@ -20,10 +20,10 @@ use rocoon_contract::{
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 use ton::block_tlb::{
     AccountState, CommonMsgInfo, CommonMsgInfoExtIn, CommonMsgInfoInt, CurrencyCollection,
-    MaybeAccount, Msg,
+    MaybeAccount, Msg, StateInit,
 };
 use ton::lite_client::{LiteClient, LiteReqParams};
-use ton::ton_core::cell::TonCell;
+use ton::ton_core::cell::{CellBuilder, CellParser, TonCell};
 use ton::ton_core::traits::tlb::TLB;
 use ton::ton_core::types::TonAddress;
 use ton::ton_core::types::tlb_core::{
@@ -32,8 +32,12 @@ use ton::ton_core::types::tlb_core::{
 
 use crate::{config::TonRuntimeConfig, wallet};
 
+const OWNER_CLIENT_REGISTER: u32 = 0xc45f_9f3b;
 pub const CONTROL_MESSAGE_VALUE_NANOTONS: u64 = 700_000_000;
+const ACTIVE_CLIENT_REGISTER_VALUE_NANOTONS: u64 = 1_000_000_000;
+pub const CLIENT_REGISTER_EXTRA_NANOTONS: u64 = 50_000_000;
 pub const COCOON_WALLET_RESERVE_NANOTONS: u64 = 100_000_000;
+const LEGACY_MIN_STAKE_NANOTONS: u64 = 1_000_000_000;
 const WALLET_FORWARD_MODE: u8 = 0;
 const WALLET_EXTERNAL_VALIDITY_SECS: u64 = 3_600;
 
@@ -124,6 +128,31 @@ pub struct TonControlRequest<'a> {
     pub wallet_seed: &'a [u8; 32],
 }
 
+/// Inputs needed to build a Cocoon client long-auth registration message.
+///
+/// Long proxy authorization requires a TON transaction before the proxy accepts
+/// `client.authorizeWithProxyLong`. The wallet forwards `owner_client_register`
+/// to the proxy-specific client contract address returned by
+/// `client.connectToProxy`.
+pub struct TonClientRegisterRequest<'a> {
+    /// External owner wallet address used to build Cocoon wallet state init.
+    pub wallet_owner_address: &'a str,
+    /// Cocoon wallet contract address.
+    pub wallet_address: &'a str,
+    /// Mainnet/testnet Cocoon root contract address.
+    pub root_contract_address: &'a str,
+    /// Client contract address returned by `client.connectToProxy`.
+    pub client_contract_address: &'a str,
+    /// Proxy smart-contract address returned by `client.connectToProxy`.
+    pub proxy_contract_address: &'a str,
+    /// Proxy public key returned by `client.connectToProxy`.
+    pub proxy_public_key: &'a [u8; 32],
+    /// Proxy-provided nonce embedded into `owner_client_register`.
+    pub nonce: u64,
+    /// Ed25519 seed used by the Cocoon wallet contract.
+    pub wallet_seed: &'a [u8; 32],
+}
+
 /// Inputs needed to send value from the Cocoon wallet to a TON address.
 pub struct TonWalletTransferRequest<'a> {
     /// External owner wallet address used to build Cocoon wallet state init.
@@ -159,6 +188,29 @@ pub struct TonControlPreparedMessage {
     pub external_message: Vec<u8>,
 }
 
+/// Signed external message prepared for long authorization registration.
+#[derive(Clone, Debug)]
+pub struct TonClientRegisterPreparedMessage {
+    /// Random query id embedded into `owner_client_register`.
+    pub query_id: u64,
+    /// Proxy-provided nonce embedded into `owner_client_register`.
+    pub nonce: u64,
+    /// Cocoon wallet seqno used for signing.
+    pub wallet_seqno: u32,
+    /// Attached internal message value in nanotons.
+    pub attached_value: u64,
+    /// Destination client contract address.
+    pub client_contract_address: String,
+    /// Cocoon wallet address that signed the external message.
+    pub wallet_address: String,
+    /// Full TON external message BOC.
+    ///
+    /// The message includes Cocoon wallet `StateInit` when wallet seqno is zero,
+    /// and the forwarded internal message includes client contract `StateInit`
+    /// when the client contract is not active yet.
+    pub external_message: Vec<u8>,
+}
+
 /// Signed external message prepared for a plain Cocoon wallet transfer.
 #[derive(Clone, Debug)]
 pub struct TonWalletTransferPreparedMessage {
@@ -181,6 +233,25 @@ pub struct TonControlResult {
     pub action: TonControlAction,
     /// Random query id embedded into the client contract message.
     pub query_id: u64,
+    /// Cocoon wallet seqno used for signing.
+    pub wallet_seqno: u32,
+    /// Attached internal message value in nanotons.
+    pub attached_value: u64,
+    /// Liteserver send status returned by `liteServer.sendMessage`.
+    pub send_status: u32,
+    /// Destination client contract address.
+    pub client_contract_address: String,
+    /// Cocoon wallet address that signed the external message.
+    pub wallet_address: String,
+}
+
+/// Result returned after long authorization registration is accepted by a liteserver.
+#[derive(Clone, Debug)]
+pub struct TonClientRegisterResult {
+    /// Random query id embedded into `owner_client_register`.
+    pub query_id: u64,
+    /// Proxy-provided nonce embedded into `owner_client_register`.
+    pub nonce: u64,
     /// Cocoon wallet seqno used for signing.
     pub wallet_seqno: u32,
     /// Attached internal message value in nanotons.
@@ -319,6 +390,99 @@ impl TonReadonlyClient {
         })
     }
 
+    /// Fetches root/wallet state, then builds and signs long-auth registration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if TON state cannot be fetched, root params do not
+    /// contain client contract code, the derived client contract address does
+    /// not match the proxy response, the Cocoon wallet is underfunded, or cell
+    /// serialization/signing fails.
+    pub fn prepare_client_register_message(
+        &self,
+        request: &TonClientRegisterRequest<'_>,
+    ) -> Result<TonClientRegisterPreparedMessage> {
+        let wallet_owner_address = TonAddress::from_str(request.wallet_owner_address)
+            .context("parse Cocoon wallet owner address")?;
+        let wallet_address =
+            TonAddress::from_str(request.wallet_address).context("parse Cocoon wallet address")?;
+        let root_contract_address = TonAddress::from_str(request.root_contract_address)
+            .context("parse Cocoon root contract address")?;
+        let client_contract_address = TonAddress::from_str(request.client_contract_address)
+            .context("parse Cocoon client contract address")?;
+        let proxy_contract_address = TonAddress::from_str(request.proxy_contract_address)
+            .context("parse Cocoon proxy contract address")?;
+
+        let context = self
+            .runtime
+            .block_on(self.fetch_client_register_context(
+                &wallet_address,
+                &root_contract_address,
+                &client_contract_address,
+            ))
+            .context("fetch TON state for long authorization")?;
+        let client_contract_needs_state_init =
+            context.client_contract.account_state != TonAccountState::Active;
+        let attached_value =
+            client_register_attached_value(&context.root_config, client_contract_needs_state_init)?;
+        let wallet_seqno = validate_cocoon_wallet_can_send_value(
+            request.wallet_address,
+            &context.wallet,
+            attached_value,
+        )?;
+
+        let state_init = build_client_contract_state_init(
+            &context.root_config,
+            &wallet_address,
+            &proxy_contract_address,
+            request.proxy_public_key,
+        )
+        .context("build Cocoon client contract state init")?;
+        let derived_address = state_init
+            .derive_address(client_contract_address.workchain)
+            .context("derive Cocoon client contract address from state init")?;
+        if derived_address != client_contract_address {
+            anyhow::bail!(
+                "client contract address mismatch: proxy returned {}, derived {}",
+                request.client_contract_address,
+                derived_address.to_hex()
+            );
+        }
+
+        let query_id = random_query_id();
+        let client_body = build_client_register_body(request.nonce, query_id, &wallet_address)
+            .context("build client contract register body")?;
+        let internal_msg = build_internal_message_with_state_init(
+            &client_contract_address,
+            attached_value,
+            client_body,
+            true,
+            client_contract_needs_state_init.then_some(state_init),
+        );
+        let internal_msg_cell = internal_msg
+            .to_cell()
+            .context("serialize wallet-forwarded client register message")?;
+
+        let external_msg = build_wallet_external_message(
+            &wallet_address,
+            &wallet_owner_address,
+            request.wallet_seed,
+            wallet_seqno,
+            internal_msg_cell,
+        )
+        .context("build signed Cocoon wallet client register message")?;
+
+        Ok(TonClientRegisterPreparedMessage {
+            query_id,
+            nonce: request.nonce,
+            wallet_seqno,
+            attached_value,
+            client_contract_address: request.client_contract_address.to_string(),
+            wallet_address: request.wallet_address.to_string(),
+            external_message: external_msg,
+        })
+    }
+
     /// Builds and signs one plain TON transfer from the Cocoon wallet.
     ///
     /// # Errors
@@ -379,6 +543,27 @@ impl TonReadonlyClient {
         Ok(TonControlResult {
             action: message.action,
             query_id: message.query_id,
+            wallet_seqno: message.wallet_seqno,
+            attached_value: message.attached_value,
+            send_status,
+            client_contract_address: message.client_contract_address.clone(),
+            wallet_address: message.wallet_address.clone(),
+        })
+    }
+
+    /// Sends a previously prepared long-auth registration message.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the liteserver rejects `sendMessage`.
+    pub fn send_prepared_client_register_message(
+        &self,
+        message: &TonClientRegisterPreparedMessage,
+    ) -> Result<TonClientRegisterResult> {
+        let send_status = self.send_raw_message(&message.external_message)?;
+        Ok(TonClientRegisterResult {
+            query_id: message.query_id,
+            nonce: message.nonce,
             wallet_seqno: message.wallet_seqno,
             attached_value: message.attached_value,
             send_status,
@@ -463,6 +648,54 @@ impl TonReadonlyClient {
             client_contract,
         })
     }
+
+    async fn fetch_client_register_context(
+        &self,
+        wallet_address: &TonAddress,
+        root_contract_address: &TonAddress,
+        client_contract_address: &TonAddress,
+    ) -> Result<ClientRegisterContext> {
+        let masterchain = self
+            .client
+            .get_mc_info()
+            .await
+            .context("get TON masterchain info")?;
+        let wallet_account = self
+            .client
+            .get_account_state(
+                wallet_address,
+                masterchain.last.seqno,
+                Some(self.req_params),
+            )
+            .await
+            .context("get Cocoon wallet account state")?;
+        let root_account = self
+            .client
+            .get_account_state(
+                root_contract_address,
+                masterchain.last.seqno,
+                Some(self.req_params),
+            )
+            .await
+            .context("get Cocoon root contract account state")?;
+        let client_contract_account = self
+            .client
+            .get_account_state(
+                client_contract_address,
+                masterchain.last.seqno,
+                Some(self.req_params),
+            )
+            .await
+            .context("get Cocoon client contract account state")?;
+        Ok(ClientRegisterContext {
+            wallet: TonWalletSnapshot::from_account(&wallet_account)
+                .context("parse Cocoon wallet account")?,
+            root_config: CocoonRootConfig::from_account(&root_account)
+                .context("parse Cocoon root contract")?,
+            client_contract: ClientContractSnapshot::from_account(&client_contract_account)
+                .context("parse Cocoon client contract account")?,
+        })
+    }
 }
 
 impl TonReadonlySnapshot {
@@ -544,6 +777,21 @@ impl ClientContractSnapshot {
     }
 }
 
+impl CocoonRootConfig {
+    fn from_account(account: &MaybeAccount) -> Result<Self> {
+        if account_state(account) != TonAccountState::Active {
+            anyhow::bail!(
+                "Cocoon root contract account is not active: {}",
+                account_state(account).as_str()
+            );
+        }
+        let data = account
+            .get_data()
+            .context("Cocoon root contract data cell is unavailable")?;
+        parse_root_config_from_data(data)
+    }
+}
+
 impl TonAccountState {
     /// Stable string representation used by `/stats`.
     #[must_use]
@@ -577,6 +825,35 @@ impl From<TonControlAction> for CocoonClientControlAction {
     }
 }
 
+struct ClientRegisterContext {
+    wallet: TonWalletSnapshot,
+    root_config: CocoonRootConfig,
+    client_contract: ClientContractSnapshot,
+}
+
+struct CocoonRootConfig {
+    min_client_stake: u64,
+    client_sc_code: TonCell,
+    client_params_cell: TonCell,
+}
+
+struct CocoonRootParams {
+    struct_version: u8,
+    params_version: u32,
+    unique_id: u32,
+    is_test: bool,
+    price_per_token: u64,
+    worker_fee_per_token: u64,
+    prompt_tokens_price_multiplier: u32,
+    cached_tokens_price_multiplier: u32,
+    completion_tokens_price_multiplier: u32,
+    reasoning_tokens_price_multiplier: u32,
+    proxy_delay_before_close: u32,
+    client_delay_before_close: u32,
+    min_proxy_stake: u64,
+    min_client_stake: u64,
+}
+
 fn path_to_str(path: &Path) -> Result<&str> {
     path.to_str()
         .with_context(|| format!("path is not valid UTF-8: {}", path.display()))
@@ -597,6 +874,284 @@ fn read_client_contract_data(data: Option<&TonCell>) -> Result<Option<CocoonClie
     CocoonClientContractData::from_cell(data)
         .map(Some)
         .context("read Cocoon client contract data cell")
+}
+
+fn parse_root_config_from_data(data: &TonCell) -> Result<CocoonRootConfig> {
+    let mut parser = data.parser();
+    let _owner_address = TonAddress::read(&mut parser).context("read root owner address")?;
+    let _ = parser
+        .read_next_ref()
+        .context("read root mutable data cell ref")?;
+    let params_cell = parser
+        .read_next_ref()
+        .context("read root params cell ref")?
+        .clone();
+    let root_params = parse_root_params_cell(&params_cell).context("parse root params cell")?;
+    let _root_version = parser
+        .read_num::<u32>(32)
+        .context("read root contract version")?;
+    if root_params.struct_version >= 4 {
+        let _key_manager_cell = parser
+            .read_next_ref()
+            .context("read root key manager cell ref")?;
+    }
+    if root_params.struct_version >= 5 {
+        let _verified_keys_cell = parser
+            .read_next_ref()
+            .context("read root verified keys cell ref")?;
+    }
+    parser
+        .ensure_empty()
+        .context("root contract data has trailing fields")?;
+
+    let client_params_cell = build_client_params_cell_without_code_refs(&root_params)
+        .context("build client params cell without code refs")?;
+    let client_sc_code = read_client_sc_code(&params_cell).context("read root client code ref")?;
+
+    Ok(CocoonRootConfig {
+        min_client_stake: root_params.min_client_stake,
+        client_sc_code,
+        client_params_cell,
+    })
+}
+
+fn parse_root_params_cell(params_cell: &TonCell) -> Result<CocoonRootParams> {
+    let mut parser = params_cell.parser();
+    let struct_version = parser
+        .read_num::<u8>(8)
+        .context("read root params struct_version")?;
+    if struct_version > 5 {
+        anyhow::bail!("unexpected root params struct_version: {struct_version}");
+    }
+    let params_version = parser
+        .read_num::<u32>(32)
+        .context("read root params params_version")?;
+    let unique_id = parser
+        .read_num::<u32>(32)
+        .context("read root params unique_id")?;
+    let is_test = parser.read_bit().context("read root params is_test")?;
+    let price_per_token = read_coins(&mut parser).context("read root params price_per_token")?;
+    let worker_fee_per_token =
+        read_coins(&mut parser).context("read root params worker_fee_per_token")?;
+    let prompt_tokens_price_multiplier = if struct_version >= 3 {
+        parser
+            .read_num::<u32>(32)
+            .context("read root params prompt multiplier")?
+    } else {
+        10_000
+    };
+    let cached_tokens_price_multiplier = if struct_version >= 2 {
+        parser
+            .read_num::<u32>(32)
+            .context("read root params cached multiplier")?
+    } else {
+        10_000
+    };
+    let completion_tokens_price_multiplier = if struct_version >= 3 {
+        parser
+            .read_num::<u32>(32)
+            .context("read root params completion multiplier")?
+    } else {
+        10_000
+    };
+    let reasoning_tokens_price_multiplier = if struct_version >= 2 {
+        parser
+            .read_num::<u32>(32)
+            .context("read root params reasoning multiplier")?
+    } else {
+        10_000
+    };
+    let proxy_delay_before_close = parser
+        .read_num::<u32>(32)
+        .context("read root params proxy_delay_before_close")?;
+    let client_delay_before_close = parser
+        .read_num::<u32>(32)
+        .context("read root params client_delay_before_close")?;
+    let min_proxy_stake = if struct_version >= 1 {
+        read_coins(&mut parser).context("read root params min_proxy_stake")?
+    } else {
+        LEGACY_MIN_STAKE_NANOTONS
+    };
+    let min_client_stake = if struct_version >= 1 {
+        read_coins(&mut parser).context("read root params min_client_stake")?
+    } else {
+        LEGACY_MIN_STAKE_NANOTONS
+    };
+
+    let _proxy_sc_code = read_maybe_ref(&mut parser).context("read root proxy code ref flag")?;
+    let _worker_sc_code = read_maybe_ref(&mut parser).context("read root worker code ref flag")?;
+    let client_sc_code = read_maybe_ref(&mut parser).context("read root client code ref flag")?;
+    parser
+        .ensure_empty()
+        .context("root params cell has trailing fields")?;
+    if client_sc_code.is_none() {
+        anyhow::bail!("root params do not contain client smart-contract code");
+    }
+
+    Ok(CocoonRootParams {
+        struct_version,
+        params_version,
+        unique_id,
+        is_test,
+        price_per_token,
+        worker_fee_per_token,
+        prompt_tokens_price_multiplier,
+        cached_tokens_price_multiplier,
+        completion_tokens_price_multiplier,
+        reasoning_tokens_price_multiplier,
+        proxy_delay_before_close,
+        client_delay_before_close,
+        min_proxy_stake,
+        min_client_stake,
+    })
+}
+
+fn read_client_sc_code(params_cell: &TonCell) -> Result<TonCell> {
+    let mut parser = params_cell.parser();
+    skip_root_params_until_code_refs(&mut parser)?;
+    let _proxy_sc_code = read_maybe_ref(&mut parser).context("read proxy code ref")?;
+    let _worker_sc_code = read_maybe_ref(&mut parser).context("read worker code ref")?;
+    read_maybe_ref(&mut parser)
+        .context("read client code ref")?
+        .context("root params do not contain client smart-contract code")
+}
+
+fn skip_root_params_until_code_refs(parser: &mut CellParser<'_>) -> Result<()> {
+    let struct_version = parser
+        .read_num::<u8>(8)
+        .context("read root params struct_version")?;
+    parser.read_num::<u32>(32).context("skip params_version")?;
+    parser.read_num::<u32>(32).context("skip unique_id")?;
+    parser.read_bit().context("skip is_test")?;
+    let _price_per_token = read_coins(parser).context("skip price_per_token")?;
+    let _worker_fee_per_token = read_coins(parser).context("skip worker_fee_per_token")?;
+    if struct_version >= 3 {
+        parser
+            .read_num::<u32>(32)
+            .context("skip prompt multiplier")?;
+    }
+    if struct_version >= 2 {
+        parser
+            .read_num::<u32>(32)
+            .context("skip cached multiplier")?;
+    }
+    if struct_version >= 3 {
+        parser
+            .read_num::<u32>(32)
+            .context("skip completion multiplier")?;
+    }
+    if struct_version >= 2 {
+        parser
+            .read_num::<u32>(32)
+            .context("skip reasoning multiplier")?;
+    }
+    parser
+        .read_num::<u32>(32)
+        .context("skip proxy_delay_before_close")?;
+    parser
+        .read_num::<u32>(32)
+        .context("skip client_delay_before_close")?;
+    if struct_version >= 1 {
+        let _min_proxy_stake = read_coins(parser).context("skip min_proxy_stake")?;
+        let _min_client_stake = read_coins(parser).context("skip min_client_stake")?;
+    }
+    Ok(())
+}
+
+fn build_client_params_cell_without_code_refs(params: &CocoonRootParams) -> Result<TonCell> {
+    let mut builder = TonCell::builder();
+    builder.write_num(&params.struct_version, 8)?;
+    builder.write_num(&params.params_version, 32)?;
+    builder.write_num(&params.unique_id, 32)?;
+    builder.write_bit(params.is_test)?;
+    write_coins(&mut builder, params.price_per_token)?;
+    write_coins(&mut builder, params.worker_fee_per_token)?;
+    if params.struct_version >= 2 {
+        if params.struct_version >= 3 {
+            builder.write_num(&params.prompt_tokens_price_multiplier, 32)?;
+        }
+        builder.write_num(&params.cached_tokens_price_multiplier, 32)?;
+        if params.struct_version >= 3 {
+            builder.write_num(&params.completion_tokens_price_multiplier, 32)?;
+        }
+        builder.write_num(&params.reasoning_tokens_price_multiplier, 32)?;
+    }
+    builder.write_num(&params.proxy_delay_before_close, 32)?;
+    builder.write_num(&params.client_delay_before_close, 32)?;
+    if params.struct_version >= 1 {
+        write_coins(&mut builder, params.min_proxy_stake)?;
+        write_coins(&mut builder, params.min_client_stake)?;
+    }
+    builder.write_bit(false)?;
+    builder.write_bit(false)?;
+    builder.write_bit(false)?;
+    builder
+        .build()
+        .context("build root params cell without code refs")
+}
+
+fn read_maybe_ref(parser: &mut CellParser<'_>) -> Result<Option<TonCell>> {
+    if parser.read_bit()? {
+        Ok(Some(parser.read_next_ref()?.clone()))
+    } else {
+        Ok(None)
+    }
+}
+
+fn read_coins(parser: &mut CellParser<'_>) -> Result<u64> {
+    TLBCoins::read(parser)
+        .context("read coins")?
+        .to_u64()
+        .context("convert coins to u64")
+}
+
+fn write_coins(builder: &mut CellBuilder, value: u64) -> Result<()> {
+    TLBCoins::new(u128::from(value))
+        .write(builder)
+        .context("write coins")
+}
+
+fn client_register_attached_value(
+    root_config: &CocoonRootConfig,
+    needs_state_init: bool,
+) -> Result<u64> {
+    if needs_state_init {
+        root_config
+            .min_client_stake
+            .checked_add(CLIENT_REGISTER_EXTRA_NANOTONS)
+            .context("client register attached value overflow")
+    } else {
+        Ok(ACTIVE_CLIENT_REGISTER_VALUE_NANOTONS)
+    }
+}
+
+fn validate_cocoon_wallet_can_send_value(
+    wallet_address: &str,
+    snapshot: &TonWalletSnapshot,
+    value_nanotons: u64,
+) -> Result<u32> {
+    let wallet_seqno = match snapshot.state {
+        TonAccountState::Active => snapshot
+            .seqno
+            .context("Cocoon wallet seqno is unavailable in active account")?,
+        TonAccountState::Uninit => 0,
+        TonAccountState::None | TonAccountState::Frozen => {
+            anyhow::bail!(
+                "Cocoon wallet account cannot send messages: {}",
+                snapshot.state.as_str()
+            );
+        }
+    };
+    let balance = snapshot
+        .balance
+        .context("Cocoon wallet balance is unavailable")?;
+    let required_balance = value_nanotons.saturating_add(COCOON_WALLET_RESERVE_NANOTONS);
+    if balance < required_balance {
+        anyhow::bail!(
+            "ACTION REQUIRED: BALANCE ON CONTRACT {wallet_address} IS TOO LOW: SENDING MESSAGE OF VALUE {value_nanotons} CURRENT {balance}"
+        );
+    }
+    Ok(wallet_seqno)
 }
 
 const fn client_contract_state_name(state: u8) -> &'static str {
@@ -636,8 +1191,70 @@ fn build_client_control_body(
         .context("build client contract control body cell")
 }
 
+fn build_client_register_body(
+    nonce: u64,
+    query_id: u64,
+    wallet_address: &TonAddress,
+) -> Result<TonCell> {
+    let mut builder = TonCell::builder();
+    builder.write_num(&OWNER_CLIENT_REGISTER, 32)?;
+    builder.write_num(&query_id, 64)?;
+    builder.write_num(&nonce, 64)?;
+    wallet_address.to_msg_address_int().write(&mut builder)?;
+    builder
+        .build()
+        .context("build client contract register body cell")
+}
+
+fn build_client_contract_state_init(
+    root_config: &CocoonRootConfig,
+    wallet_address: &TonAddress,
+    proxy_contract_address: &TonAddress,
+    proxy_public_key: &[u8; 32],
+) -> Result<StateInit> {
+    let mut const_data_builder = TonCell::builder();
+    wallet_address
+        .to_msg_address_int()
+        .write(&mut const_data_builder)?;
+    proxy_contract_address
+        .to_msg_address_int()
+        .write(&mut const_data_builder)?;
+    const_data_builder.write_bits(proxy_public_key, 256)?;
+    let const_data = const_data_builder
+        .build()
+        .context("build client contract const data cell")?;
+
+    let mut data_builder = TonCell::builder();
+    data_builder.write_num(&0u8, 2)?;
+    write_coins(&mut data_builder, 0)?;
+    write_coins(&mut data_builder, root_config.min_client_stake)?;
+    data_builder.write_num(&0u64, 64)?;
+    data_builder.write_num(&0u32, 32)?;
+    data_builder.write_bits([0u8; 32], 256)?;
+    data_builder.write_ref(const_data)?;
+    data_builder.write_ref(root_config.client_params_cell.clone())?;
+    let data = data_builder
+        .build()
+        .context("build client contract data cell")?;
+
+    Ok(StateInit::new(root_config.client_sc_code.clone(), data))
+}
+
 fn build_internal_message(dest: &TonAddress, value_nanotons: u64, body: TonCell) -> Msg<TonCell> {
     build_internal_message_with_bounce(dest, value_nanotons, body, true)
+}
+
+fn build_internal_message_with_state_init(
+    dest: &TonAddress,
+    value_nanotons: u64,
+    body: TonCell,
+    bounce: bool,
+    state_init: Option<StateInit>,
+) -> Msg<TonCell> {
+    let mut message = build_internal_message_with_bounce(dest, value_nanotons, body, bounce);
+    message.init =
+        state_init.map(|init| TLBEitherRef::new_with_layout(init, EitherRefLayout::ToRef));
+    message
 }
 
 fn build_internal_message_with_bounce(
@@ -722,12 +1339,72 @@ fn valid_until() -> Result<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::build_wallet_external_message;
+    use super::{
+        ACTIVE_CLIENT_REGISTER_VALUE_NANOTONS, CLIENT_REGISTER_EXTRA_NANOTONS,
+        OWNER_CLIENT_REGISTER, TonControlAction, build_client_control_body,
+        build_client_register_body, build_wallet_external_message, client_register_attached_value,
+        read_cocoon_wallet_seqno,
+    };
+    use rocoon_contract::OWNER_CLIENT_WITHDRAW;
     use std::str::FromStr;
     use ton::block_tlb::Msg;
     use ton::ton_core::cell::TonCell;
     use ton::ton_core::traits::tlb::TLB;
     use ton::ton_core::types::TonAddress;
+
+    #[test]
+    fn cocoon_wallet_seqno_is_first_u32_in_data_cell() -> anyhow::Result<()> {
+        let owner = TonAddress::from_str("UQD5MEMHNCHR-zkATB3elGUvRfNiZAlK_luIj0matDI1xH_H")?;
+        let cell =
+            rocoon_contract::CocoonWalletData::from_public_key(owner, &[9_u8; 32])?.to_cell()?;
+
+        assert_eq!(read_cocoon_wallet_seqno(Some(&cell))?, Some(0));
+        Ok(())
+    }
+
+    #[test]
+    fn client_control_body_starts_with_opcode_and_query_id() -> anyhow::Result<()> {
+        let wallet = TonAddress::from_str("UQA9iqwh-HWRz20_M4h5idcVcVesVHL6KVeaaJdCU5Ydq2Bi")?;
+        let cell = build_client_control_body(TonControlAction::Withdraw, 42, &wallet)?;
+        let mut parser = cell.parser();
+
+        assert_eq!(parser.read_num::<u32>(32)?, OWNER_CLIENT_WITHDRAW);
+        assert_eq!(parser.read_num::<u64>(64)?, 42);
+        Ok(())
+    }
+
+    #[test]
+    fn client_register_body_matches_cpp_layout() -> anyhow::Result<()> {
+        let wallet = TonAddress::from_str("UQA9iqwh-HWRz20_M4h5idcVcVesVHL6KVeaaJdCU5Ydq2Bi")?;
+        let cell = build_client_register_body(99, 42, &wallet)?;
+        let mut parser = cell.parser();
+
+        assert_eq!(parser.read_num::<u32>(32)?, OWNER_CLIENT_REGISTER);
+        assert_eq!(parser.read_num::<u64>(64)?, 42);
+        assert_eq!(parser.read_num::<u64>(64)?, 99);
+        assert_eq!(TonAddress::read(&mut parser)?, wallet);
+        parser.ensure_empty()?;
+        Ok(())
+    }
+
+    #[test]
+    fn client_register_value_depends_on_state_init() -> anyhow::Result<()> {
+        let root_config = super::CocoonRootConfig {
+            min_client_stake: 15_000_000_000,
+            client_sc_code: TonCell::empty().to_owned(),
+            client_params_cell: TonCell::empty().to_owned(),
+        };
+
+        assert_eq!(
+            client_register_attached_value(&root_config, true)?,
+            root_config.min_client_stake + CLIENT_REGISTER_EXTRA_NANOTONS
+        );
+        assert_eq!(
+            client_register_attached_value(&root_config, false)?,
+            ACTIVE_CLIENT_REGISTER_VALUE_NANOTONS
+        );
+        Ok(())
+    }
 
     #[test]
     fn wallet_external_message_adds_state_init_for_seqno_zero() -> anyhow::Result<()> {

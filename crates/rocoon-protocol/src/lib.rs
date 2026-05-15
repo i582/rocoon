@@ -103,6 +103,11 @@ struct ClientAuthorizeWithProxyShort<'a> {
     data: &'a [u8],
 }
 
+/// TL request sent after on-chain long authorization registration.
+#[derive(Debug, TlWrite)]
+#[tl(boxed, id = 0xd3474303)]
+struct ClientAuthorizeWithProxyLong;
+
 /// TL request for model and worker discovery.
 ///
 /// Source TL:
@@ -553,6 +558,12 @@ pub fn encode_authorize_with_proxy_short(secret: &str) -> Vec<u8> {
     })
 }
 
+/// Encodes `client.authorizeWithProxyLong`.
+#[must_use]
+pub fn encode_authorize_with_proxy_long() -> Vec<u8> {
+    tl_proto::serialize(ClientAuthorizeWithProxyLong)
+}
+
 /// Encodes `client.getWorkerTypesV2`.
 #[must_use]
 pub fn encode_get_worker_types_v2() -> Vec<u8> {
@@ -665,4 +676,16 @@ pub fn decode_http_response(raw: &[u8]) -> Result<HttpResponse<'_>> {
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn write_raw_f64<P: tl_proto::TlPacket>(value: &f64, packet: &mut P) {
     packet.write_u64(value.to_bits());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_authorize_with_proxy_long;
+
+    #[test]
+    fn authorize_with_proxy_long_uses_cocoon_constructor_id() {
+        let payload = encode_authorize_with_proxy_long();
+
+        assert_eq!(&payload[..4], &0xd347_4303_u32.to_le_bytes());
+    }
 }

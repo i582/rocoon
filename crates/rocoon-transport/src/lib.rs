@@ -6,6 +6,7 @@
 //! metadata/auth and raw `tcp.packet` streaming for `client.runQueryEx`.
 
 use std::io::{Read, Write};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use rand::Rng;
@@ -357,6 +358,44 @@ impl<RW: Read + Write> Session<RW> {
             .read_exact(&mut payload)
             .context("read frame payload")?;
         Ok(payload)
+    }
+}
+
+impl Session<ratls::RatlsStream> {
+    /// Sends a one-shot `tcp.query` with a temporary socket read timeout.
+    ///
+    /// This is primarily used for long authorization, where the proxy may wait
+    /// for an on-chain registration transaction before answering.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Session::make_request`], plus timeout setup
+    /// or restore errors from the underlying TCP socket.
+    pub fn make_request_with_timeout(
+        &mut self,
+        request_payload: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>> {
+        let previous_timeout = self
+            .io
+            .read_timeout()
+            .context("read current socket timeout")?;
+        self.io
+            .set_read_timeout(Some(timeout))
+            .context("set socket read timeout")?;
+        let result = self.make_request(request_payload);
+        let restore_result = self
+            .io
+            .set_read_timeout(previous_timeout)
+            .context("restore socket read timeout");
+
+        match (result, restore_result) {
+            (Ok(response), Ok(())) => Ok(response),
+            (Ok(_), Err(error)) | (Err(error), Ok(())) => Err(error),
+            (Err(error), Err(restore_error)) => Err(error.context(format!(
+                "restore socket read timeout also failed: {restore_error:#}"
+            ))),
+        }
     }
 }
 

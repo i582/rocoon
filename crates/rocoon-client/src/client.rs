@@ -15,7 +15,8 @@ use sha2::{Digest, Sha256};
 use crate::config::{RuntimeConfig, TonRuntimeConfig};
 use crate::ton_readonly::{
     COCOON_WALLET_RESERVE_NANOTONS, CONTROL_MESSAGE_VALUE_NANOTONS, ClientContractSnapshot,
-    TonAccountState, TonControlAction, TonControlPreparedMessage, TonControlRequest,
+    TonAccountState, TonClientRegisterPreparedMessage, TonClientRegisterRequest,
+    TonClientRegisterResult, TonControlAction, TonControlPreparedMessage, TonControlRequest,
     TonControlResult, TonReadonlyClient, TonReadonlySnapshot, TonWalletSnapshot,
     TonWalletTransferPreparedMessage, TonWalletTransferRequest, TonWalletTransferResult,
 };
@@ -23,6 +24,7 @@ use rocoon_protocol::{self as cocoon, RunQueryOptions, WorkerInstanceV2, WorkerT
 use rocoon_transport::{QueryFinalInfo, RunQueryOutput, Session, pow, ratls};
 
 const CONTROL_RESEND_INTERVAL: Duration = Duration::from_secs(30);
+const AUTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 const COCOON_CLIENT_CONTRACT_STATE_CLOSED: u8 = 2;
 
 /// Authenticated Cocoon proxy client.
@@ -171,12 +173,13 @@ impl CocoonClient {
     ///
     /// The handshake sequence is:
     /// TCP connect -> Cocoon `PoW` -> RA-TLS -> `tcp.connect` session ->
-    /// `client.connectToProxy` -> `client.authorizeWithProxyShort`.
+    /// `client.connectToProxy` -> short auth, or on-chain long auth register
+    /// followed by `client.authorizeWithProxyLong`.
     ///
     /// # Errors
     ///
     /// Returns an error if DNS/TCP connection, `PoW`, RA-TLS, session framing,
-    /// proxy authorization, or config-derived short authentication fails.
+    /// proxy authorization, or TON long-auth registration fails.
     pub fn connect(config: &RuntimeConfig) -> Result<Self> {
         let addr = &config.proxy_addr;
         println!("connecting to Cocoon proxy at {addr}");
@@ -208,8 +211,8 @@ impl CocoonClient {
             Session::connect(tls).context("Cocoon tcp.connect session handshake")?;
         println!("session connected: id={}", connected.id);
 
-        let authorization = authorize(&mut session, config)?;
-        let ton_readonly = TonReadonlyState::new(config);
+        let mut ton_readonly = TonReadonlyState::new(config);
+        let authorization = authorize(&mut session, config, &mut ton_readonly)?;
 
         Ok(Self {
             session,
@@ -285,9 +288,6 @@ impl CocoonClient {
     }
 
     /// Sends a local control request to the connected Cocoon client contract.
-    ///
-    /// This currently supports only already-registered client contracts. The
-    /// long-auth registration path from Go is intentionally not implemented.
     ///
     /// # Errors
     ///
@@ -793,6 +793,103 @@ impl TonReadonlyState {
         }
     }
 
+    fn prepare_client_register(
+        &mut self,
+        request: &TonClientRegisterRequest<'_>,
+    ) -> Result<TonClientRegisterPreparedMessage> {
+        match self {
+            Self::Disabled => anyhow::bail!("TON liteclient is disabled"),
+            Self::Failed { config, error } => {
+                eprintln!("TON liteclient is unavailable, reconnecting: {error}");
+                let config = config.clone();
+                match TonReadonlyClient::connect(&config) {
+                    Ok(client) => {
+                        *self = Self::Ready { config, client };
+                        self.prepare_client_register(request)
+                    }
+                    Err(reconnect_error) => {
+                        anyhow::bail!(
+                            "TON liteclient is unavailable: {error}; reconnect failed: {reconnect_error:#}"
+                        );
+                    }
+                }
+            }
+            Self::Ready { config, client } => match client.prepare_client_register_message(request)
+            {
+                Ok(message) => Ok(message),
+                Err(first_error) => {
+                    eprintln!(
+                        "long auth register prepare failed, reconnecting liteclient: {first_error:#}"
+                    );
+                    match TonReadonlyClient::connect(config) {
+                        Ok(replacement) => {
+                            *client = replacement;
+                            client
+                                .prepare_client_register_message(request)
+                                .with_context(|| {
+                                    format!("{first_error:#}; retry after reconnect also failed")
+                                })
+                        }
+                        Err(reconnect_error) => {
+                            anyhow::bail!("{first_error:#}; reconnect failed: {reconnect_error:#}");
+                        }
+                    }
+                }
+            },
+        }
+    }
+
+    fn send_prepared_client_register(
+        &mut self,
+        message: &TonClientRegisterPreparedMessage,
+    ) -> Result<TonClientRegisterResult> {
+        match self {
+            Self::Disabled => anyhow::bail!("TON liteclient is disabled"),
+            Self::Failed { config, error } => {
+                eprintln!("TON liteclient is unavailable, reconnecting: {error}");
+                let config = config.clone();
+                match TonReadonlyClient::connect(&config) {
+                    Ok(client) => {
+                        *self = Self::Ready { config, client };
+                        self.send_prepared_client_register(message)
+                    }
+                    Err(reconnect_error) => {
+                        anyhow::bail!(
+                            "TON liteclient is unavailable: {error}; reconnect failed: {reconnect_error:#}"
+                        );
+                    }
+                }
+            }
+            Self::Ready { config, client } => {
+                match client.send_prepared_client_register_message(message) {
+                    Ok(result) => Ok(result),
+                    Err(first_error) => {
+                        eprintln!(
+                            "long auth register send failed, reconnecting liteclient: {first_error:#}"
+                        );
+                        match TonReadonlyClient::connect(config) {
+                            Ok(replacement) => {
+                                *client = replacement;
+                                client
+                                    .send_prepared_client_register_message(message)
+                                    .with_context(|| {
+                                        format!(
+                                            "{first_error:#}; retry after reconnect also failed"
+                                        )
+                                    })
+                            }
+                            Err(reconnect_error) => {
+                                anyhow::bail!(
+                                    "{first_error:#}; reconnect failed: {reconnect_error:#}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn send_prepared_control(
         &self,
         message: &TonControlPreparedMessage,
@@ -874,6 +971,14 @@ fn validate_cocoon_wallet_can_send_control(
     wallet_address: &str,
     snapshot: &TonWalletSnapshot,
 ) -> Result<u32> {
+    validate_cocoon_wallet_can_send_value(wallet_address, snapshot, CONTROL_MESSAGE_VALUE_NANOTONS)
+}
+
+fn validate_cocoon_wallet_can_send_value(
+    wallet_address: &str,
+    snapshot: &TonWalletSnapshot,
+    value_nanotons: u64,
+) -> Result<u32> {
     let wallet_seqno = match snapshot.state {
         TonAccountState::Active => snapshot
             .seqno
@@ -889,11 +994,10 @@ fn validate_cocoon_wallet_can_send_control(
     let balance = snapshot
         .balance
         .context("Cocoon wallet balance is unavailable")?;
-    let required_balance =
-        CONTROL_MESSAGE_VALUE_NANOTONS.saturating_add(COCOON_WALLET_RESERVE_NANOTONS);
+    let required_balance = value_nanotons.saturating_add(COCOON_WALLET_RESERVE_NANOTONS);
     if balance < required_balance {
         anyhow::bail!(
-            "ACTION REQUIRED: BALANCE ON CONTRACT {wallet_address} IS TOO LOW: SENDING MESSAGE OF VALUE {CONTROL_MESSAGE_VALUE_NANOTONS} CURRENT {balance}"
+            "ACTION REQUIRED: BALANCE ON CONTRACT {wallet_address} IS TOO LOW: SENDING MESSAGE OF VALUE {value_nanotons} CURRENT {balance}"
         );
     }
     Ok(wallet_seqno)
@@ -965,13 +1069,10 @@ struct AuthorizationInfo {
 }
 
 /// Performs Cocoon proxy authorization and returns the negotiated protocol version.
-///
-/// The current prototype supports short authorization with a local secret. Long
-/// authorization requires on-chain registration/top-up and is intentionally not
-/// implemented here.
 fn authorize(
     session: &mut Session<ratls::RatlsStream>,
     config: &RuntimeConfig,
+    ton_readonly: &mut TonReadonlyState,
 ) -> Result<AuthorizationInfo> {
     println!(
         "authenticating owner {} via Cocoon wallet {}",
@@ -991,25 +1092,35 @@ fn authorize(
     let client_sc_address =
         String::from_utf8_lossy(connected_to_proxy.client_sc_address).into_owned();
 
+    let proxy_public_key = *connected_to_proxy.params.proxy_public_key;
     let payment_status = match connected_to_proxy.auth {
-        cocoon::ProxyAuth::Short { secret_hash, .. } => {
-            let Some(secret) = config.client_secret.as_deref() else {
-                anyhow::bail!("short auth requires client.secret in TOML or COCOON_CLIENT_SECRET");
-            };
-            verify_secret_hash(secret, secret_hash)?;
-
-            let request = cocoon::encode_authorize_with_proxy_short(secret);
-            let response = session
-                .make_request(&request)
-                .context("client.authorizeWithProxyShort")?;
-            let auth = cocoon::decode_authorization_with_proxy(&response)?;
-            payment_status_from_auth(&auth)?
+        cocoon::ProxyAuth::Short { secret_hash, nonce } => {
+            if let Some(secret) = config.client_secret.as_deref()
+                && secret_hash_matches(secret, secret_hash)
+            {
+                authorize_short(session, secret)?
+            } else {
+                eprintln!("short auth secret is unavailable or stale; falling back to long auth");
+                authorize_long(
+                    session,
+                    config,
+                    ton_readonly,
+                    tl_long_to_u64(nonce),
+                    &client_sc_address,
+                    &proxy_sc_address,
+                    &proxy_public_key,
+                )?
+            }
         }
-        cocoon::ProxyAuth::Long { nonce } => {
-            anyhow::bail!(
-                "auth: long nonce={nonce}; on-chain register is required before Rust can serve requests"
-            );
-        }
+        cocoon::ProxyAuth::Long { nonce } => authorize_long(
+            session,
+            config,
+            ton_readonly,
+            tl_long_to_u64(nonce),
+            &client_sc_address,
+            &proxy_sc_address,
+            &proxy_public_key,
+        )?,
     };
 
     Ok(AuthorizationInfo {
@@ -1021,13 +1132,78 @@ fn authorize(
     })
 }
 
+fn authorize_short(
+    session: &mut Session<ratls::RatlsStream>,
+    secret: &str,
+) -> Result<AuthPaymentStatus> {
+    let request = cocoon::encode_authorize_with_proxy_short(secret);
+    let response = session
+        .make_request_with_timeout(&request, AUTH_REQUEST_TIMEOUT)
+        .context("client.authorizeWithProxyShort")?;
+    let auth = cocoon::decode_authorization_with_proxy(&response)?;
+    payment_status_from_auth(&auth)
+}
+
+fn authorize_long(
+    session: &mut Session<ratls::RatlsStream>,
+    config: &RuntimeConfig,
+    ton_readonly: &mut TonReadonlyState,
+    nonce: u64,
+    client_sc_address: &str,
+    proxy_sc_address: &str,
+    proxy_public_key: &[u8; 32],
+) -> Result<AuthPaymentStatus> {
+    let root_contract_address = config
+        .ton
+        .root_contract_address
+        .as_deref()
+        .context("ton.root_contract_address is required for long auth")?;
+    println!(
+        "running long auth: client_contract={client_sc_address} proxy_contract={proxy_sc_address} nonce={nonce}"
+    );
+    let request = TonClientRegisterRequest {
+        wallet_owner_address: &config.owner_address,
+        wallet_address: &config.cocoon_wallet_address,
+        root_contract_address,
+        client_contract_address: client_sc_address,
+        proxy_contract_address: proxy_sc_address,
+        proxy_public_key,
+        nonce,
+        wallet_seed: config.node_wallet_key.seed(),
+    };
+    let prepared = ton_readonly
+        .prepare_client_register(&request)
+        .context("prepare long auth register transaction")?;
+    let result = ton_readonly
+        .send_prepared_client_register(&prepared)
+        .context("send long auth register transaction")?;
+    println!(
+        "long auth register sent: wallet={} client_contract={} value={} wallet_seqno={} query_id={} nonce={} send_status={}",
+        result.wallet_address,
+        result.client_contract_address,
+        result.attached_value,
+        result.wallet_seqno,
+        result.query_id,
+        result.nonce,
+        result.send_status
+    );
+
+    let request = cocoon::encode_authorize_with_proxy_long();
+    let response = session
+        .make_request_with_timeout(&request, AUTH_REQUEST_TIMEOUT)
+        .context("client.authorizeWithProxyLong")?;
+    let auth = cocoon::decode_authorization_with_proxy(&response)?;
+    payment_status_from_auth(&auth)
+}
+
 /// Checks that the configured secret matches the proxy-provided challenge hash.
-fn verify_secret_hash(secret: &str, expected: &[u8; 32]) -> Result<()> {
+fn secret_hash_matches(secret: &str, expected: &[u8; 32]) -> bool {
     let digest = Sha256::digest(secret.as_bytes());
-    if digest.as_slice() != expected {
-        anyhow::bail!("client secret hash does not match proxy challenge");
-    }
-    Ok(())
+    digest.as_slice() == expected
+}
+
+const fn tl_long_to_u64(value: i64) -> u64 {
+    u64::from_le_bytes(value.to_le_bytes())
 }
 
 /// Converts the proxy authorization result into local payment status.

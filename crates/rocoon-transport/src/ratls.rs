@@ -9,6 +9,7 @@
 use std::fmt;
 use std::net::TcpStream;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use rcgen::{CertificateParams, KeyPair};
@@ -29,6 +30,14 @@ impl RatlsStream {
     #[must_use]
     pub const fn server_cert_der_len(&self) -> usize {
         self.server_cert_der_len
+    }
+
+    pub(crate) fn read_timeout(&self) -> std::io::Result<Option<Duration>> {
+        self.inner.sock.read_timeout()
+    }
+
+    pub(crate) fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.inner.sock.set_read_timeout(timeout)
     }
 }
 

@@ -21,6 +21,8 @@ use crate::wallet;
 
 const DEFAULT_CONFIG_PATH: &str = "rocoon.toml";
 const DEFAULT_PROXY_ADDR: &str = "91.108.4.11:8888";
+const DEFAULT_MAINNET_ROOT_CONTRACT_ADDRESS: &str =
+    "EQCns7bYSp0igFvS1wpb5wsZjCKCV19MD5AVzI4EyxsnU73k";
 const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 5;
 const DEFAULT_TON_QUERY_TIMEOUT_MILLIS: u64 = 5_000;
 
@@ -216,6 +218,13 @@ impl RuntimeConfig {
             "derive Cocoon wallet address from client.owner_address and client.node_wallet_key",
         )?;
 
+        let root_contract_address = config.ton.root_contract_address.or_else(|| {
+            config
+                .ton
+                .mainnet
+                .then_some(DEFAULT_MAINNET_ROOT_CONTRACT_ADDRESS.to_string())
+        });
+
         Ok(Self {
             config_path,
             proxy_addr: config.network.proxy_addr,
@@ -233,7 +242,7 @@ impl RuntimeConfig {
                 readonly_enabled: config.ton.readonly_enabled,
                 mainnet: config.ton.mainnet,
                 config_path: config.ton.config_path,
-                root_contract_address: config.ton.root_contract_address,
+                root_contract_address,
                 query_timeout_millis: config.ton.query_timeout_millis,
             },
         })
