@@ -31,7 +31,7 @@ Workspace layout:
   color-mode helpers.
 - `rocoon-client`: high-level Cocoon client API: proxy authorization, model
   discovery, and completion requests.
-- `rocoon-openai-server`: local OpenAI-compatible HTTP bridge over
+- `rocoon-server`: local OpenAI-compatible HTTP bridge over
   `rocoon-client`.
 - `rocoon`: thin binary that loads config, connects the client, and starts the
   HTTP bridge.

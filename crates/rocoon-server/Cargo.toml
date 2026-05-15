@@ -1,8 +1,8 @@
 [package]
-name = "rocoon-openai-server"
+name = "rocoon-server"
 version.workspace = true
 edition.workspace = true
-description = "OpenAI-compatible local HTTP bridge for rocoon-client."
+description = "Local HTTP bridge for rocoon-client."
 repository.workspace = true
 license.workspace = true
 publish = false

@@ -14,7 +14,7 @@ use rocoon_config::{
     RuntimeConfig,
     color::{ColorMode, OwoColorize, init_color_mode},
 };
-use rocoon_openai_server::{Defaults, serve};
+use rocoon_server::{Defaults, serve};
 
 const NANOTONS_PER_TON: u64 = 1_000_000_000;
 const STATE_FILE_NAME: &str = ".rocoon-state";

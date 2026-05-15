@@ -2,7 +2,7 @@
 members = [
     "crates/rocoon-config",
     "crates/rocoon-client",
-    "crates/rocoon-openai-server",
+    "crates/rocoon-server",
     "crates/rocoon-openai-types",
     "crates/rocoon-protocol",
     "crates/rocoon-contract",
@@ -40,10 +40,10 @@ panic = "deny"
 [workspace.dependencies]
 rocoon-client = { path = "crates/rocoon-client" }
 rocoon-config = { path = "crates/rocoon-config" }
-rocoon-openai-server = { path = "crates/rocoon-openai-server" }
 rocoon-openai-types = { path = "crates/rocoon-openai-types" }
 rocoon-protocol = { path = "crates/rocoon-protocol" }
 rocoon-contract = { path = "crates/rocoon-contract" }
+rocoon-server = { path = "crates/rocoon-server" }
 rocoon-transport = { path = "crates/rocoon-transport" }
 anyhow = "1"
 async-openai = { version = "0.38", default-features = false, features = ["chat-completion-types", "model-types"] }
@@ -82,4 +82,4 @@ anyhow.workspace = true
 clap.workspace = true
 rocoon-client = { workspace = true }
 rocoon-config = { workspace = true }
-rocoon-openai-server = { workspace = true }
+rocoon-server = { workspace = true }
