@@ -26,7 +26,7 @@ pub struct RatlsStream {
 
 impl RatlsStream {
     /// Returns the DER length of the first server certificate, or zero if none.
-    pub fn server_cert_der_len(&self) -> usize {
+    pub const fn server_cert_der_len(&self) -> usize {
         self.server_cert_der_len
     }
 }
@@ -73,8 +73,7 @@ pub fn connect(stream: TcpStream) -> Result<RatlsStream> {
         .conn
         .peer_certificates()
         .and_then(|certs| certs.first())
-        .map(|cert| cert.len())
-        .unwrap_or(0);
+        .map_or(0, |cert| cert.len());
 
     Ok(RatlsStream {
         inner,

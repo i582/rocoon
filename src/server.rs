@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use anyhow::{Context, Result};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::client::{CocoonClient, HttpExchange};
 
@@ -60,15 +60,11 @@ pub fn serve(listen_addr: &str, client: CocoonClient, defaults: Defaults) -> Res
         let stream = stream.context("accept HTTP connection")?;
         let client = Arc::clone(&client);
         thread::spawn(move || {
-            if let Err(error) = handle_connection(stream, client, defaults) {
+            if let Err(error) = handle_connection(stream, &client, defaults) {
                 eprintln!("HTTP request failed: {error:#}");
                 if let Some(mut stream) = error.stream {
-                    let _ = write_json(
-                        &mut stream,
-                        error.status_code,
-                        json!({"error": {"message": error.message, "type": "rocoon_error"}}),
-                        Vec::new(),
-                    );
+                    let body = json!({"error": {"message": error.message, "type": "rocoon_error"}});
+                    let _ = write_json(&mut stream, error.status_code, &body, Vec::new());
                 }
             }
         });
@@ -82,16 +78,16 @@ pub fn serve(listen_addr: &str, client: CocoonClient, defaults: Defaults) -> Res
 /// error response if the socket is usable.
 fn handle_connection(
     mut stream: TcpStream,
-    client: Arc<Mutex<CocoonClient>>,
+    client: &Arc<Mutex<CocoonClient>>,
     defaults: Defaults,
 ) -> std::result::Result<(), HttpError> {
     let request = read_http_request(&mut stream)
-        .map_err(|error| HttpError::new(stream.try_clone().ok(), 400, error))?;
+        .map_err(|error| HttpError::new(stream.try_clone().ok(), 400, &error))?;
     let path = request.path.split('?').next().unwrap_or(&request.path);
 
     match (request.method.as_str(), path) {
-        ("GET", "/health") => write_json(&mut stream, 200, json!({"status": "ok"}), Vec::new())
-            .map_err(|error| HttpError::new(None, 500, error)),
+        ("GET", "/health") => write_json(&mut stream, 200, &json!({"status": "ok"}), Vec::new())
+            .map_err(|error| HttpError::new(None, 500, &error)),
         ("GET", "/v1/models") => {
             let models = client
                 .lock()
@@ -99,7 +95,7 @@ fn handle_connection(
                     HttpError::message(stream.try_clone().ok(), 500, "Cocoon client mutex poisoned")
                 })?
                 .get_worker_types_v2()
-                .map_err(|error| HttpError::new(stream.try_clone().ok(), 502, error))?;
+                .map_err(|error| HttpError::new(stream.try_clone().ok(), 502, &error))?;
             let data: Vec<_> = models
                 .into_iter()
                 .map(|model| {
@@ -121,14 +117,14 @@ fn handle_connection(
             write_json(
                 &mut stream,
                 200,
-                json!({"object": "list", "data": data}),
+                &json!({"object": "list", "data": data}),
                 Vec::new(),
             )
-            .map_err(|error| HttpError::new(None, 500, error))
+            .map_err(|error| HttpError::new(None, 500, &error))
         }
-        ("POST", "/v1/chat/completions") | ("POST", "/v1/completions") => {
+        ("POST", "/v1/chat/completions" | "/v1/completions") => {
             let completion = parse_completion_request(&request.body, defaults)
-                .map_err(|error| HttpError::new(stream.try_clone().ok(), 400, error))?;
+                .map_err(|error| HttpError::new(stream.try_clone().ok(), 400, &error))?;
             let response = client
                 .lock()
                 .map_err(|_| {
@@ -142,17 +138,17 @@ fn handle_connection(
                     completion.max_tokens,
                     completion.timeout,
                 )
-                .map_err(|error| HttpError::new(stream.try_clone().ok(), 502, error))?;
+                .map_err(|error| HttpError::new(stream.try_clone().ok(), 502, &error))?;
             write_cocoon_http_response(&mut stream, response)
-                .map_err(|error| HttpError::new(None, 500, error))
+                .map_err(|error| HttpError::new(None, 500, &error))
         }
         _ => write_json(
             &mut stream,
             404,
-            json!({"error": {"message": "not found", "type": "invalid_request_error"}}),
+            &json!({"error": {"message": "not found", "type": "invalid_request_error"}}),
             Vec::new(),
         )
-        .map_err(|error| HttpError::new(None, 500, error)),
+        .map_err(|error| HttpError::new(None, 500, &error)),
     }
 }
 
@@ -165,7 +161,7 @@ struct HttpError {
 
 impl HttpError {
     /// Builds an error from an `anyhow::Error`.
-    fn new(stream: Option<TcpStream>, status_code: i32, error: anyhow::Error) -> Self {
+    fn new(stream: Option<TcpStream>, status_code: i32, error: &anyhow::Error) -> Self {
         Self {
             stream,
             status_code,
@@ -260,9 +256,9 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
     Ok(HttpRequest { method, path, body })
 }
 
-/// Parses and sanitizes OpenAI completion JSON.
+/// Parses and sanitizes `OpenAI` completion JSON.
 ///
-/// The model name is extracted for Cocoon routing. Cocoon-specific knobs
+/// The model name is extracted for Cocoon routing. `Cocoon`-specific knobs
 /// (`max_coefficient`, `timeout`) are removed from the forwarded JSON body,
 /// while token limits are normalized for worker compatibility.
 fn parse_completion_request(body: &[u8], defaults: Defaults) -> Result<CompletionRequest> {
@@ -317,7 +313,7 @@ fn parse_completion_request(body: &[u8], defaults: Defaults) -> Result<Completio
     {
         let stream_options = object
             .entry("stream_options")
-            .or_insert_with(|| Value::Object(Default::default()));
+            .or_insert_with(|| Value::Object(Map::default()));
         if let Some(stream_options) = stream_options.as_object_mut() {
             stream_options.insert("include_usage".to_string(), Value::from(true));
         }
@@ -350,12 +346,12 @@ fn write_cocoon_http_response(stream: &mut TcpStream, response: HttpExchange) ->
 fn write_json(
     stream: &mut TcpStream,
     status_code: i32,
-    value: Value,
+    value: &Value,
     headers: Vec<(String, String)>,
 ) -> Result<()> {
     let mut headers = headers;
     headers.push(("Content-Type".to_string(), "application/json".to_string()));
-    let body = serde_json::to_vec(&value).context("serialize JSON response")?;
+    let body = serde_json::to_vec(value).context("serialize JSON response")?;
     write_response(
         stream,
         status_code,
@@ -386,7 +382,7 @@ fn write_response(
     normalized.insert("content-length".to_string(), body.len().to_string());
     normalized.insert("connection".to_string(), "close".to_string());
 
-    write!(stream, "HTTP/1.1 {} {}\r\n", status_code, reason).context("write status line")?;
+    write!(stream, "HTTP/1.1 {status_code} {reason}\r\n").context("write status line")?;
     for (name, value) in normalized {
         write!(stream, "{}: {}\r\n", canonical_header_name(&name), value)
             .context("write response header")?;
@@ -415,9 +411,8 @@ fn find_header_end(data: &[u8]) -> Option<usize> {
 }
 
 /// Returns a small reason phrase set for generated responses.
-fn reason_phrase(status_code: i32) -> &'static str {
+const fn reason_phrase(status_code: i32) -> &'static str {
     match status_code {
-        200 => "OK",
         400 => "Bad Request",
         404 => "Not Found",
         500 => "Internal Server Error",
@@ -433,10 +428,9 @@ fn canonical_header_name(name: &str) -> String {
     name.split('-')
         .map(|part| {
             let mut chars = part.chars();
-            match chars.next() {
-                Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
-                None => String::new(),
-            }
+            chars.next().map_or_else(String::new, |first| {
+                format!("{}{}", first.to_ascii_uppercase(), chars.as_str())
+            })
         })
         .collect::<Vec<_>>()
         .join("-")

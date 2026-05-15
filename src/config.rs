@@ -49,7 +49,7 @@ pub struct RuntimeConfig {
 }
 
 /// TOML root object before validation and environment overrides.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct FileConfig {
     network: NetworkConfig,
@@ -146,17 +146,6 @@ impl RuntimeConfig {
             max_tokens: config.request.max_tokens,
             request_timeout: config.request.timeout_secs,
         })
-    }
-}
-
-impl Default for FileConfig {
-    fn default() -> Self {
-        Self {
-            network: NetworkConfig::default(),
-            server: ServerConfig::default(),
-            client: ClientConfig::default(),
-            request: RequestConfig::default(),
-        }
     }
 }
 

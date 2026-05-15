@@ -29,6 +29,14 @@ Run:
 cargo run
 ```
 
+Checks:
+
+```bash
+cargo fmt --all
+cargo clippy --all-targets --all-features
+cargo check
+```
+
 Config:
 
 ```toml

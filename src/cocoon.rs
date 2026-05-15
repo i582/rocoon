@@ -226,7 +226,7 @@ pub struct QueryFinalInfo<'tl> {
 
 /// Token usage counters inside `QueryFinalInfo`.
 #[derive(Debug, Clone, Copy, TlRead)]
-#[allow(dead_code)]
+#[allow(clippy::struct_field_names, dead_code)]
 pub struct TokensUsedTl {
     pub prompt_tokens_used: i64,
     pub cached_tokens_used: i64,
@@ -305,7 +305,7 @@ pub fn encode_get_worker_types_v2() -> Vec<u8> {
 pub fn encode_http_request(
     method: &str,
     url: &str,
-    headers: Vec<(&str, String)>,
+    headers: &[(&str, String)],
     payload: &[u8],
 ) -> Vec<u8> {
     let headers = headers
@@ -335,7 +335,7 @@ pub fn encode_run_query_ex(
     options: RunQueryOptions,
 ) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(&0xf54cb74bu32.to_le_bytes());
+    out.extend_from_slice(&0xf54c_b74b_u32.to_le_bytes());
     write_tl_bytes(&mut out, model.as_bytes());
     write_tl_bytes(&mut out, query);
     out.extend_from_slice(&options.max_coefficient.to_le_bytes());
@@ -383,6 +383,7 @@ pub fn decode_http_response(raw: &[u8]) -> Result<HttpResponse<'_>> {
 }
 
 /// Writes a TL byte string with the required four-byte alignment.
+#[allow(clippy::branches_sharing_code, clippy::cast_possible_truncation)]
 fn write_tl_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     let len = bytes.len();
     if len < 254 {
@@ -401,13 +402,17 @@ fn write_tl_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
 
 /// Writes the boxed TL boolean constructor used by Cocoon.
 fn write_tl_bool(out: &mut Vec<u8>, value: bool) {
-    let magic = if value { 0x997275b5u32 } else { 0xbc799737u32 };
+    let magic = if value {
+        0x9972_75b5_u32
+    } else {
+        0xbc79_9737_u32
+    };
     out.extend_from_slice(&magic.to_le_bytes());
 }
 
 /// Pads the current buffer to the next TL four-byte boundary.
 fn pad_to_four(out: &mut Vec<u8>) {
-    while out.len() % 4 != 0 {
+    while !out.len().is_multiple_of(4) {
         out.push(0);
     }
 }

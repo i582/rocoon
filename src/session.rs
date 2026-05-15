@@ -1,6 +1,6 @@
 //! Cocoon TCP session framing.
 //!
-//! After PoW and RA-TLS, Cocoon uses a compact frame protocol with send/receive
+//! After `PoW` and RA-TLS, Cocoon uses a compact frame protocol with send/receive
 //! sequence numbers and TL packets inside each frame. This module owns that
 //! framing layer and provides two request styles: classic `tcp.query` for
 //! metadata/auth and raw `tcp.packet` streaming for `client.runQueryEx`.
@@ -157,9 +157,10 @@ impl<RW: Read + Write> Session<RW> {
                     let pong = tl_proto::serialize(TcpPong { id });
                     self.send_frame(&pong).context("send tcp.pong")?;
                 }
-                TcpPacket::Pong { .. } => {}
-                TcpPacket::Packet { .. } => {}
-                TcpPacket::QueryAnswer { .. } | TcpPacket::QueryError { .. } => {}
+                TcpPacket::Pong { .. }
+                | TcpPacket::Packet { .. }
+                | TcpPacket::QueryAnswer { .. }
+                | TcpPacket::QueryError { .. } => {}
             }
         }
     }
@@ -250,8 +251,9 @@ impl<RW: Read + Write> Session<RW> {
                     let pong = tl_proto::serialize(TcpPong { id });
                     self.send_frame(&pong).context("send tcp.pong")?;
                 }
-                TcpPacket::Pong { .. } => {}
-                TcpPacket::QueryAnswer { .. } | TcpPacket::QueryError { .. } => {}
+                TcpPacket::Pong { .. }
+                | TcpPacket::QueryAnswer { .. }
+                | TcpPacket::QueryError { .. } => {}
             }
         }
     }

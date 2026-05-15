@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 const POW_SIMPLE_MAGIC: u32 = 0x418e_1291;
 const POW_SIMPLE_RESPONSE_MAGIC: u32 = 0x0182_7319;
 
-/// Timing and difficulty information for a solved PoW challenge.
+/// Timing and difficulty information for a solved `PoW` challenge.
 pub struct PowStats {
     /// Difficulty requested by the proxy, measured in leading zero bits.
     pub difficulty: i32,
@@ -30,7 +30,7 @@ struct Challenge {
     salt: [u8; 16],
 }
 
-/// Completes the proxy PoW exchange on an open TCP stream.
+/// Completes the proxy `PoW` exchange on an open TCP stream.
 pub fn handshake<RW: Read + Write>(io: &mut RW) -> Result<PowStats> {
     let challenge = read_challenge(io)?;
     let start = Instant::now();
@@ -45,7 +45,7 @@ pub fn handshake<RW: Read + Write>(io: &mut RW) -> Result<PowStats> {
     })
 }
 
-/// Reads and validates the fixed-size PoW challenge.
+/// Reads and validates the fixed-size `PoW` challenge.
 fn read_challenge<R: Read>(reader: &mut R) -> Result<Challenge> {
     let mut buf = [0u8; 24];
     reader
@@ -57,7 +57,10 @@ fn read_challenge<R: Read>(reader: &mut R) -> Result<Challenge> {
         anyhow::bail!("unexpected PoW magic 0x{magic:08x}, expected 0x{POW_SIMPLE_MAGIC:08x}");
     }
 
-    let difficulty = u32::from_le_bytes(buf[4..8].try_into().unwrap()) as i32;
+    let difficulty = i32::from_le_bytes(buf[4..8].try_into()?);
+    if difficulty < 0 {
+        anyhow::bail!("negative PoW difficulty {difficulty}");
+    }
     let mut salt = [0u8; 16];
     salt.copy_from_slice(&buf[8..24]);
 
@@ -76,12 +79,14 @@ fn send_response<W: Write>(writer: &mut W, nonce: u64) -> Result<()> {
 fn solve(challenge: &Challenge) -> u64 {
     let mut data = [0u8; 24];
     data[0..16].copy_from_slice(&challenge.salt);
+    let difficulty =
+        u32::try_from(challenge.difficulty).expect("validated non-negative PoW difficulty");
 
     let mut nonce = 0u64;
     loop {
         data[16..24].copy_from_slice(&nonce.to_le_bytes());
         let hash = Sha256::digest(data);
-        if leading_zero_bits(&hash[..]) >= challenge.difficulty as u32 {
+        if leading_zero_bits(&hash[..]) >= difficulty {
             return nonce;
         }
         nonce += 1;

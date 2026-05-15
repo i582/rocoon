@@ -1,6 +1,6 @@
 //! High-level Cocoon client orchestration.
 //!
-//! This module ties the lower protocol layers together: TCP connect, PoW,
+//! This module ties the lower protocol layers together: TCP connect, `PoW`,
 //! RA-TLS, Cocoon session framing, proxy authorization, model discovery, and
 //! inference requests. It exposes domain-level methods used by the local HTTP
 //! server instead of leaking TL objects or frame handling into the API layer.
@@ -65,7 +65,7 @@ impl CocoonClient {
     /// Opens and authorizes a full Cocoon proxy connection.
     ///
     /// The handshake sequence is:
-    /// TCP connect -> Cocoon PoW -> RA-TLS -> `tcp.connect` session ->
+    /// TCP connect -> Cocoon `PoW` -> RA-TLS -> `tcp.connect` session ->
     /// `client.connectToProxy` -> `client.authorizeWithProxyShort`.
     pub fn connect(config: &RuntimeConfig) -> Result<Self> {
         let addr = &config.proxy_addr;
@@ -157,8 +157,8 @@ impl CocoonClient {
         // encrypted. The zero key preserves that wire shape.
         options.public_key = (self.proto_version >= 3).then_some([0u8; 32]);
 
-        let http_request =
-            cocoon::encode_http_request("POST", path, json_request_headers(body.len()), body);
+        let headers = json_request_headers(body.len());
+        let http_request = cocoon::encode_http_request("POST", path, &headers, body);
         let output = match self
             .session
             .run_client_query_ex(model, &http_request, options)
@@ -219,7 +219,7 @@ fn authorize(session: &mut Session<ratls::RatlsStream>, config: &RuntimeConfig) 
                 .make_request(&request)
                 .context("client.authorizeWithProxyShort")?;
             let auth = cocoon::decode_authorization_with_proxy(&response)?;
-            print_authorization_result(auth)?;
+            print_authorization_result(&auth)?;
         }
         cocoon::ProxyAuth::Long { nonce } => {
             anyhow::bail!(
@@ -234,14 +234,14 @@ fn authorize(session: &mut Session<ratls::RatlsStream>, config: &RuntimeConfig) 
 /// Checks that the configured secret matches the proxy-provided challenge hash.
 fn verify_secret_hash(secret: &str, expected: &[u8; 32]) -> Result<()> {
     let digest = Sha256::digest(secret.as_bytes());
-    if digest.as_slice() == expected {
-        return Ok(());
+    if digest.as_slice() != expected {
+        anyhow::bail!("client secret hash does not match proxy challenge");
     }
-    anyhow::bail!("client secret hash does not match proxy challenge")
+    Ok(())
 }
 
 /// Converts the proxy authorization result into either a concise log or error.
-fn print_authorization_result(auth: cocoon::AuthorizationWithProxy<'_>) -> Result<()> {
+fn print_authorization_result(auth: &cocoon::AuthorizationWithProxy<'_>) -> Result<()> {
     match auth {
         cocoon::AuthorizationWithProxy::Success {
             signed_payment: _,
@@ -249,13 +249,12 @@ fn print_authorization_result(auth: cocoon::AuthorizationWithProxy<'_>) -> Resul
             max_tokens,
         } => {
             println!(
-                "auth success: tokens_committed_to_db={} max_tokens={}",
-                tokens_committed_to_db, max_tokens
+                "auth success: tokens_committed_to_db={tokens_committed_to_db} max_tokens={max_tokens}"
             );
             Ok(())
         }
         cocoon::AuthorizationWithProxy::Failed { error_code, error } => {
-            anyhow::bail!("auth failed: code={} error={}", error_code, utf8(error)?)
+            anyhow::bail!("auth failed: code={error_code} error={}", utf8(error)?)
         }
     }
 }
@@ -297,7 +296,7 @@ fn model_info_from_tl(value: &WorkerTypeV2<'_>) -> ModelInfo {
 }
 
 /// Converts one TL worker entry into API-facing worker metadata.
-fn worker_info_from_tl(value: &WorkerInstanceV2) -> WorkerInfo {
+const fn worker_info_from_tl(value: &WorkerInstanceV2) -> WorkerInfo {
     WorkerInfo {
         coefficient: value.coefficient,
         active_requests: value.active_requests,

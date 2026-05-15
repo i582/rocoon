@@ -2,6 +2,22 @@
 name = "rocoon"
 version = "0.1.0"
 edition = "2024"
+description = "Minimal Rust bridge for the Cocoon proxy protocol."
+repository = "https://github.com/i582/rocoon"
+license = "LicenseRef-UNLICENSED"
+keywords = ["cocoon", "ton", "openai", "proxy"]
+categories = ["command-line-utilities", "network-programming"]
+publish = false
+
+[lints.rust]
+unsafe_code = "forbid"
+warnings = "deny"
+
+[lints.clippy]
+all = "deny"
+cargo = "deny"
+nursery = "deny"
+pedantic = "deny"
 
 [dependencies]
 anyhow = "1"
