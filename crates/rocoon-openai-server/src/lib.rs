@@ -16,6 +16,8 @@ use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 
 use rocoon_client::{COCOON_WALLET_RESERVE_NANOTONS, CocoonClient, HttpExchange, TonControlAction};
+use rocoon_openai_types::errors as openai_errors;
+use rocoon_openai_types::models::{self as openai_models, Model};
 
 mod stats;
 use stats::{CompletionFailure, CompletionSuccess, ServerStats};
@@ -91,7 +93,7 @@ pub fn serve(listen_addr: &str, client: CocoonClient, defaults: Defaults) -> Res
             if let Err(error) = handle_connection(stream, &state, defaults) {
                 eprintln!("HTTP request failed: {error:#}");
                 if let Some(mut stream) = error.stream {
-                    let body = json!({"error": {"message": error.message, "type": "rocoon_error"}});
+                    let body = openai_errors::make_response(error.message, "rocoon_error");
                     let _ = write_json(&mut stream, error.status_code, &body, Vec::new());
                 }
             }
@@ -148,7 +150,7 @@ fn handle_connection(
         _ => write_json(
             &mut stream,
             404,
-            &json!({"error": {"message": "not found", "type": "invalid_request_error"}}),
+            &openai_errors::make_response("not found", "invalid_request_error"),
             Vec::new(),
         )
         .map_err(|error| HttpError::new(None, 500, &error)),
@@ -186,31 +188,11 @@ fn handle_models(
         })?
         .get_worker_types_v2()
         .map_err(|error| HttpError::new(stream.try_clone().ok(), 502, &error))?;
-    let data: Vec<_> = models
-        .into_iter()
-        .map(|model| {
-            json!({
-                "id": model.id,
-                "object": "model",
-                "created": 0,
-                "owned_by": "?",
-                "workers": model.workers.into_iter().map(|worker| {
-                    json!({
-                        "coefficient": worker.coefficient,
-                        "running_requests": worker.active_requests,
-                        "max_running_requests": worker.max_active_requests,
-                    })
-                }).collect::<Vec<_>>(),
-            })
-        })
-        .collect();
-    write_json(
-        stream,
-        200,
-        &json!({"object": "list", "data": data}),
-        Vec::new(),
-    )
-    .map_err(|error| HttpError::new(None, 500, &error))
+
+    let response =
+        openai_models::make_response(models.into_iter().map(|model| Model::new(model.id)));
+    write_json(stream, 200, &response, Vec::new())
+        .map_err(|error| HttpError::new(None, 500, &error))
 }
 
 /// Sends a Cocoon client-contract control message via the local wallet.
@@ -686,7 +668,7 @@ fn write_cocoon_http_response(stream: &mut TcpStream, response: HttpExchange) ->
 fn write_json(
     stream: &mut TcpStream,
     status_code: i32,
-    value: &Value,
+    value: &(impl serde::Serialize + ?Sized),
     headers: Vec<(String, String)>,
 ) -> Result<()> {
     let mut headers = headers;

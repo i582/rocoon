@@ -1,0 +1,18 @@
+[package]
+name = "rocoon-openai-types"
+version.workspace = true
+edition.workspace = true
+description = "OpenAI-compatible request and response types for rocoon."
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+async-openai.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
