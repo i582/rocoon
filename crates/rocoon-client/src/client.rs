@@ -406,7 +406,6 @@ impl CocoonClient {
         &mut self,
         destination_address: Option<&str>,
         reserve_nanotons: u64,
-        allow_untracked_closed: bool,
     ) -> Result<TonWalletTransferResult> {
         let ton = self
             .ton_readonly
@@ -431,11 +430,6 @@ impl CocoonClient {
             anyhow::bail!("wallet transaction is already running");
         }
         validate_client_contract_closed_for_sweep(client_contract)?;
-        if !allow_untracked_closed && !self.client_contract_close_confirmed {
-            anyhow::bail!(
-                "client contract close was not confirmed by this rocoon process; call /request/close first or pass force=true for an already closed contract"
-            );
-        }
 
         let wallet = ton
             .wallet

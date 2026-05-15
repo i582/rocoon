@@ -61,7 +61,6 @@ struct CompletionRequest {
 struct WalletSweepRequest {
     destination_address: Option<String>,
     reserve_nanotons: u64,
-    force_untracked_closed: bool,
 }
 
 /// Serves the local OpenAI-compatible API forever.
@@ -267,7 +266,6 @@ fn handle_wallet_sweep(
         .sweep_cocoon_wallet(
             request.destination_address.as_deref(),
             request.reserve_nanotons,
-            request.force_untracked_closed,
         )
         .map_err(|error| HttpError::new(stream.try_clone().ok(), 502, &error))?;
     write_json(
@@ -281,7 +279,6 @@ fn handle_wallet_sweep(
             "amount_ton": format_nanotons_u64_as_ton(result.amount),
             "reserve": request.reserve_nanotons,
             "reserve_ton": format_nanotons_u64_as_ton(request.reserve_nanotons),
-            "force_untracked_closed": request.force_untracked_closed,
             "send_status": result.send_status,
             "destination_address": result.destination_address,
             "wallet_address": result.wallet_address
@@ -594,11 +591,6 @@ fn parse_wallet_sweep_request(query: &str, body: &[u8]) -> Result<WalletSweepReq
         .map(|value| parse_u64_string("reserve_nanotons", &value))
         .transpose()?
         .unwrap_or(COCOON_WALLET_RESERVE_NANOTONS);
-    let mut force_untracked_closed = query_param(query, "force")
-        .or_else(|| query_param(query, "force_untracked_closed"))
-        .map(|value| parse_bool_string("force", &value))
-        .transpose()?
-        .unwrap_or(false);
     if let Some(amount) = query_param(query, "amount")
         && amount != "all"
     {
@@ -609,7 +601,6 @@ fn parse_wallet_sweep_request(query: &str, body: &[u8]) -> Result<WalletSweepReq
         return Ok(WalletSweepRequest {
             destination_address,
             reserve_nanotons,
-            force_untracked_closed,
         });
     }
 
@@ -630,12 +621,6 @@ fn parse_wallet_sweep_request(query: &str, body: &[u8]) -> Result<WalletSweepReq
     {
         reserve_nanotons = parse_u64_json("reserve_nanotons", value)?;
     }
-    if let Some(value) = object
-        .get("force")
-        .or_else(|| object.get("force_untracked_closed"))
-    {
-        force_untracked_closed = parse_bool_json("force", value)?;
-    }
     if let Some(value) = object.get("amount")
         && !value.is_null()
         && value.as_str().is_none_or(|amount| amount != "all")
@@ -646,7 +631,6 @@ fn parse_wallet_sweep_request(query: &str, body: &[u8]) -> Result<WalletSweepReq
     Ok(WalletSweepRequest {
         destination_address,
         reserve_nanotons,
-        force_untracked_closed,
     })
 }
 
@@ -666,26 +650,6 @@ fn parse_u64_json(field: &str, value: &Value) -> Result<u64> {
         return parse_u64_string(field, string);
     }
     anyhow::bail!("{field} must be a non-negative integer")
-}
-
-/// Parses a boolean stored as a query string.
-fn parse_bool_string(field: &str, value: &str) -> Result<bool> {
-    match value {
-        "1" | "true" | "yes" | "on" => Ok(true),
-        "0" | "false" | "no" | "off" => Ok(false),
-        _ => anyhow::bail!("{field} must be a boolean"),
-    }
-}
-
-/// Parses a boolean stored either as JSON bool or string.
-fn parse_bool_json(field: &str, value: &Value) -> Result<bool> {
-    if let Some(value) = value.as_bool() {
-        return Ok(value);
-    }
-    if let Some(value) = value.as_str() {
-        return parse_bool_string(field, value);
-    }
-    anyhow::bail!("{field} must be a boolean")
 }
 
 /// Reads an optional string field from JSON.
