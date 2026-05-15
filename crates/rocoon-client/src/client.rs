@@ -6,6 +6,9 @@
 //! the local HTTP server instead of leaking TL objects or frame handling into
 //! the API layer.
 
+use std::error::Error;
+use std::fmt;
+use std::io::{self, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
@@ -33,6 +36,34 @@ const BALANCE_CHECK_MAX_SECS: f64 = 2.0;
 const PAYMENT_COMPARE_MIN_SECS: f64 = 10.0;
 const PAYMENT_COMPARE_MAX_SECS: f64 = 20.0;
 const COCOON_CLIENT_CONTRACT_STATE_CLOSED: u8 = 2;
+const INTERACTIVE_REQUIRED_WALLET_BALANCE_NANOTONS: u64 = 20_000_000_000;
+const NANOTONS_PER_TON: u64 = 1_000_000_000;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConnectVerbosity {
+    Quiet,
+    Verbose,
+    Interactive,
+    InteractiveVerbose,
+}
+
+impl ConnectVerbosity {
+    const fn is_verbose(self) -> bool {
+        matches!(self, Self::Verbose | Self::InteractiveVerbose)
+    }
+
+    const fn is_interactive(self) -> bool {
+        matches!(self, Self::Interactive | Self::InteractiveVerbose)
+    }
+
+    const fn interactive(verbose: bool) -> Self {
+        if verbose {
+            Self::InteractiveVerbose
+        } else {
+            Self::Interactive
+        }
+    }
+}
 
 /// Authenticated Cocoon proxy client.
 ///
@@ -54,6 +85,7 @@ pub struct CocoonClient {
     client_contract_close_confirmed: bool,
     next_balance_check_at: Instant,
     next_payment_compare_at: Instant,
+    verbosity: ConnectVerbosity,
 }
 
 /// Snapshot of local client state that can be exposed through `/stats`.
@@ -191,8 +223,59 @@ impl CocoonClient {
     /// Returns an error if DNS/TCP connection, `PoW`, RA-TLS, session framing,
     /// proxy authorization, or TON long-auth registration fails.
     pub fn connect(config: &RuntimeConfig) -> Result<Self> {
+        Self::connect_with_verbosity(config, ConnectVerbosity::Quiet)
+    }
+
+    /// Opens and authorizes a full Cocoon proxy connection with debug logging.
+    ///
+    /// This is useful for CLI diagnostics while `connect` stays silent enough
+    /// for library callers.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as `connect`.
+    pub fn connect_verbose(config: &RuntimeConfig) -> Result<Self> {
+        Self::connect_with_verbosity(config, ConnectVerbosity::Verbose)
+    }
+
+    /// Opens and authorizes a full Cocoon proxy connection for CLI use.
+    ///
+    /// When long authorization is required, this variant shows the derived
+    /// Cocoon wallet address, waits until the user confirms funding, and turns
+    /// low-balance TON errors into concise retry prompts.
+    ///
+    /// # Errors
+    ///
+    /// Returns non-actionable connection, transport, protocol, and TON errors.
+    pub fn connect_interactive(config: &RuntimeConfig) -> Result<Self> {
+        let verbosity = ConnectVerbosity::interactive(config.verbose);
+        loop {
+            println!(
+                "{} Connecting to Cocoon proxy {}",
+                color_status("info"),
+                config.proxy_addr
+            );
+            match Self::connect_with_verbosity(config, verbosity) {
+                Ok(client) => {
+                    println!("{} Cocoon proxy connected", color_status("ok"));
+                    return Ok(client);
+                }
+                Err(error) => {
+                    let Some(action) = wallet_funding_required_from_error(&error) else {
+                        return Err(error);
+                    };
+                    print_actionable_balance_error(action);
+                    wait_for_enter("Fund the wallet and press Enter to retry: ")?;
+                }
+            }
+        }
+    }
+
+    fn connect_with_verbosity(config: &RuntimeConfig, verbosity: ConnectVerbosity) -> Result<Self> {
         let addr = &config.proxy_addr;
-        println!("connecting to Cocoon proxy at {addr}");
+        if verbosity.is_verbose() {
+            println!("connecting to Cocoon proxy at {addr}");
+        }
         let socket_addr = addr
             .to_socket_addrs()
             .with_context(|| format!("resolve {addr}"))?
@@ -204,25 +287,31 @@ impl CocoonClient {
         tcp.set_nodelay(true).context("set TCP_NODELAY")?;
 
         let pow = pow::handshake(&mut tcp).context("Cocoon TCP PoW handshake")?;
-        println!(
-            "pow solved: difficulty={} nonce={} elapsed_ms={}",
-            pow.difficulty,
-            pow.nonce,
-            pow.elapsed.as_millis()
-        );
+        if verbosity.is_verbose() {
+            println!(
+                "pow solved: difficulty={} nonce={} elapsed_ms={}",
+                pow.difficulty,
+                pow.nonce,
+                pow.elapsed.as_millis()
+            );
+        }
 
         let tls = ratls::connect(tcp).context("Cocoon RA-TLS handshake")?;
-        println!(
-            "tls connected: server_cert_der_len={}",
-            tls.server_cert_der_len()
-        );
+        if verbosity.is_verbose() {
+            println!(
+                "tls connected: server_cert_der_len={}",
+                tls.server_cert_der_len()
+            );
+        }
 
         let (mut session, connected) =
             Session::connect(tls).context("Cocoon tcp.connect session handshake")?;
-        println!("session connected: id={}", connected.id);
+        if verbosity.is_verbose() {
+            println!("session connected: id={}", connected.id);
+        }
 
         let mut ton_readonly = TonReadonlyState::new(config);
-        let authorization = authorize(&mut session, config, &mut ton_readonly)?;
+        let authorization = authorize(&mut session, config, &mut ton_readonly, verbosity)?;
 
         Ok(Self {
             session,
@@ -247,6 +336,7 @@ impl CocoonClient {
             client_contract_close_confirmed: false,
             next_balance_check_at: Instant::now(),
             next_payment_compare_at: Instant::now(),
+            verbosity,
         })
     }
 
@@ -538,13 +628,15 @@ impl CocoonClient {
         let client_contract_close_confirmed = self.client_contract_close_confirmed;
         let next_balance_check_at = self.next_balance_check_at;
         let next_payment_compare_at = self.next_payment_compare_at;
-        let mut replacement = Self::connect(&self.config)?;
+        let verbosity = self.verbosity;
+        let mut replacement = Self::connect_with_verbosity(&self.config, verbosity)?;
         replacement.control_request = control_request;
         replacement.client_top_up_request = client_top_up_request;
         replacement.wallet_transfer_request = wallet_transfer_request;
         replacement.client_contract_close_confirmed = client_contract_close_confirmed;
         replacement.next_balance_check_at = next_balance_check_at;
         replacement.next_payment_compare_at = next_payment_compare_at;
+        replacement.verbosity = verbosity;
         *self = replacement;
         Ok(())
     }
@@ -600,16 +692,18 @@ impl CocoonClient {
             .ton_readonly
             .send_prepared_client_top_up(&prepared)
             .context("send client top-up transaction")?;
-        println!(
-            "client top-up sent: wallet={} client_contract={} top_up={} value={} wallet_seqno={} query_id={} send_status={}",
-            result.wallet_address,
-            result.client_contract_address,
-            result.top_up_amount,
-            result.attached_value,
-            result.wallet_seqno,
-            result.query_id,
-            result.send_status
-        );
+        if self.verbosity.is_verbose() {
+            println!(
+                "client top-up sent: wallet={} client_contract={} top_up={} value={} wallet_seqno={} query_id={} send_status={}",
+                result.wallet_address,
+                result.client_contract_address,
+                result.top_up_amount,
+                result.attached_value,
+                result.wallet_seqno,
+                result.query_id,
+                result.send_status
+            );
+        }
         self.client_top_up_request =
             Some(PendingClientTopUpRequest::new(&prepared, client_contract));
         Ok(())
@@ -1268,6 +1362,31 @@ fn validate_client_contract_control(snapshot: &ClientContractSnapshot) -> Result
     Ok(())
 }
 
+#[derive(Debug)]
+struct CocoonWalletFundingRequired {
+    wallet_address: String,
+    current_balance: u64,
+    required_balance: u64,
+    missing_balance: u64,
+    message_value: u64,
+}
+
+impl fmt::Display for CocoonWalletFundingRequired {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Cocoon wallet {} balance is too low: current={} nanotons, required={} nanotons, missing={} nanotons, message_value={} nanotons",
+            self.wallet_address,
+            self.current_balance,
+            self.required_balance,
+            self.missing_balance,
+            self.message_value
+        )
+    }
+}
+
+impl Error for CocoonWalletFundingRequired {}
+
 fn validate_cocoon_wallet_can_send_control(
     wallet_address: &str,
     snapshot: &TonWalletSnapshot,
@@ -1299,9 +1418,14 @@ fn validate_cocoon_wallet_can_send_value(
     let required_balance = required_for_message.max(COCOON_WALLET_MIN_BALANCE_NANOTONS);
     if balance < required_balance {
         let missing_balance = required_balance - balance;
-        anyhow::bail!(
-            "ACTION REQUIRED: Cocoon wallet {wallet_address} balance is too low: current={balance} nanotons, required={required_balance} nanotons, missing={missing_balance} nanotons. Required balance is max(message value {value_nanotons} + reserve {COCOON_WALLET_RESERVE_NANOTONS}, minimum wallet balance {COCOON_WALLET_MIN_BALANCE_NANOTONS}). Top up the Cocoon wallet before retrying."
-        );
+        return Err(CocoonWalletFundingRequired {
+            wallet_address: wallet_address.to_string(),
+            current_balance: balance,
+            required_balance,
+            missing_balance,
+            message_value: value_nanotons,
+        }
+        .into());
     }
     Ok(wallet_seqno)
 }
@@ -1375,16 +1499,27 @@ struct AuthorizationInfo {
     payment_status: AuthPaymentStatus,
 }
 
+#[derive(Clone, Copy)]
+struct LongAuthParams<'a> {
+    nonce: u64,
+    client_sc_address: &'a str,
+    proxy_sc_address: &'a str,
+    proxy_public_key: &'a [u8; 32],
+}
+
 /// Performs Cocoon proxy authorization and returns the negotiated protocol version.
 fn authorize(
     session: &mut Session<ratls::RatlsStream>,
     config: &RuntimeConfig,
     ton_readonly: &mut TonReadonlyState,
+    verbosity: ConnectVerbosity,
 ) -> Result<AuthorizationInfo> {
-    println!(
-        "authenticating owner {} via Cocoon wallet {}",
-        config.owner_address, config.cocoon_wallet_address
-    );
+    if verbosity.is_verbose() {
+        println!(
+            "authenticating owner {} via Cocoon wallet {}",
+            config.owner_address, config.cocoon_wallet_address
+        );
+    }
     let request =
         cocoon::encode_connect_to_proxy(&config.cocoon_wallet_address, config.min_config_version);
     let response = session
@@ -1405,17 +1540,24 @@ fn authorize(
             if let Some(secret) = config.client_secret.as_deref()
                 && secret_hash_matches(secret, secret_hash)
             {
-                authorize_short(session, secret)?
+                authorize_short(session, secret, verbosity)?
             } else {
-                eprintln!("short auth secret is unavailable or stale; falling back to long auth");
+                if verbosity.is_verbose() {
+                    eprintln!(
+                        "short auth secret is unavailable or stale; falling back to long auth"
+                    );
+                }
                 authorize_long(
                     session,
                     config,
                     ton_readonly,
-                    tl_long_to_u64(nonce),
-                    &client_sc_address,
-                    &proxy_sc_address,
-                    &proxy_public_key,
+                    LongAuthParams {
+                        nonce: tl_long_to_u64(nonce),
+                        client_sc_address: &client_sc_address,
+                        proxy_sc_address: &proxy_sc_address,
+                        proxy_public_key: &proxy_public_key,
+                    },
+                    verbosity,
                 )?
             }
         }
@@ -1423,10 +1565,13 @@ fn authorize(
             session,
             config,
             ton_readonly,
-            tl_long_to_u64(nonce),
-            &client_sc_address,
-            &proxy_sc_address,
-            &proxy_public_key,
+            LongAuthParams {
+                nonce: tl_long_to_u64(nonce),
+                client_sc_address: &client_sc_address,
+                proxy_sc_address: &proxy_sc_address,
+                proxy_public_key: &proxy_public_key,
+            },
+            verbosity,
         )?,
     };
 
@@ -1442,40 +1587,44 @@ fn authorize(
 fn authorize_short(
     session: &mut Session<ratls::RatlsStream>,
     secret: &str,
+    verbosity: ConnectVerbosity,
 ) -> Result<AuthPaymentStatus> {
     let request = cocoon::encode_authorize_with_proxy_short(secret);
     let response = session
         .make_request_with_timeout(&request, AUTH_REQUEST_TIMEOUT)
         .context("client.authorizeWithProxyShort")?;
     let auth = cocoon::decode_authorization_with_proxy(&response)?;
-    payment_status_from_auth(&auth)
+    payment_status_from_auth(&auth, verbosity)
 }
 
 fn authorize_long(
     session: &mut Session<ratls::RatlsStream>,
     config: &RuntimeConfig,
     ton_readonly: &mut TonReadonlyState,
-    nonce: u64,
-    client_sc_address: &str,
-    proxy_sc_address: &str,
-    proxy_public_key: &[u8; 32],
+    params: LongAuthParams<'_>,
+    verbosity: ConnectVerbosity,
 ) -> Result<AuthPaymentStatus> {
     let root_contract_address = config
         .ton
         .root_contract_address
         .as_deref()
         .context("ton.root_contract_address is required for long auth")?;
-    println!(
-        "running long auth: client_contract={client_sc_address} proxy_contract={proxy_sc_address} nonce={nonce}"
-    );
+    if verbosity.is_interactive() {
+        wait_for_long_auth_funding(config)?;
+    } else if verbosity.is_verbose() {
+        println!(
+            "running long auth: client_contract={} proxy_contract={} nonce={}",
+            params.client_sc_address, params.proxy_sc_address, params.nonce
+        );
+    }
     let request = TonClientRegisterRequest {
         wallet_owner_address: &config.owner_address,
         wallet_address: &config.cocoon_wallet_address,
         root_contract_address,
-        client_contract_address: client_sc_address,
-        proxy_contract_address: proxy_sc_address,
-        proxy_public_key,
-        nonce,
+        client_contract_address: params.client_sc_address,
+        proxy_contract_address: params.proxy_sc_address,
+        proxy_public_key: params.proxy_public_key,
+        nonce: params.nonce,
         wallet_seed: config.node_wallet_key.seed(),
     };
     let prepared = ton_readonly
@@ -1484,23 +1633,30 @@ fn authorize_long(
     let result = ton_readonly
         .send_prepared_client_register(&prepared)
         .context("send long auth register transaction")?;
-    println!(
-        "long auth register sent: wallet={} client_contract={} value={} wallet_seqno={} query_id={} nonce={} send_status={}",
-        result.wallet_address,
-        result.client_contract_address,
-        result.attached_value,
-        result.wallet_seqno,
-        result.query_id,
-        result.nonce,
-        result.send_status
-    );
+    if verbosity.is_interactive() {
+        println!(
+            "{} Long auth transaction sent, waiting for proxy confirmation",
+            color_status("ok")
+        );
+    } else if verbosity.is_verbose() {
+        println!(
+            "long auth register sent: wallet={} client_contract={} value={} wallet_seqno={} query_id={} nonce={} send_status={}",
+            result.wallet_address,
+            result.client_contract_address,
+            result.attached_value,
+            result.wallet_seqno,
+            result.query_id,
+            result.nonce,
+            result.send_status
+        );
+    }
 
     let request = cocoon::encode_authorize_with_proxy_long();
     let response = session
         .make_request_with_timeout(&request, AUTH_REQUEST_TIMEOUT)
         .context("client.authorizeWithProxyLong")?;
     let auth = cocoon::decode_authorization_with_proxy(&response)?;
-    payment_status_from_auth(&auth)
+    payment_status_from_auth(&auth, verbosity)
 }
 
 fn update_payment_status(session: &mut Session<ratls::RatlsStream>) -> Result<AuthPaymentStatus> {
@@ -1516,6 +1672,114 @@ fn update_payment_status(session: &mut Session<ratls::RatlsStream>) -> Result<Au
     ))
 }
 
+fn wait_for_long_auth_funding(config: &RuntimeConfig) -> Result<()> {
+    println!(
+        "{} Long auth requires a funded Cocoon wallet",
+        color_status("info")
+    );
+    println!("Address: {}", config.cocoon_wallet_address);
+    println!("Deposit 20 TON to this address, then continue.");
+    wait_for_enter("Press Enter after funding: ")?;
+
+    loop {
+        match read_interactive_wallet_balance(config) {
+            Ok(Some(balance)) if balance < INTERACTIVE_REQUIRED_WALLET_BALANCE_NANOTONS => {
+                print_wallet_balance_problem(
+                    &config.cocoon_wallet_address,
+                    balance,
+                    INTERACTIVE_REQUIRED_WALLET_BALANCE_NANOTONS,
+                );
+                wait_for_enter("Fund the wallet and press Enter: ")?;
+            }
+            Ok(Some(balance)) => {
+                println!(
+                    "{} Cocoon wallet balance: {} TON",
+                    color_status("ok"),
+                    format_nanotons(balance)
+                );
+                return Ok(());
+            }
+            Ok(None) => {
+                println!(
+                    "{} Balance check is disabled; continuing",
+                    color_status("warn")
+                );
+                return Ok(());
+            }
+            Err(error) => {
+                println!(
+                    "{} Could not check Cocoon wallet balance: {error:#}",
+                    color_status("warn")
+                );
+                println!("Continuing; TON will return a clear error if the wallet is underfunded.");
+                return Ok(());
+            }
+        }
+    }
+}
+
+fn read_interactive_wallet_balance(config: &RuntimeConfig) -> Result<Option<u64>> {
+    if !config.ton.readonly_enabled {
+        return Ok(None);
+    }
+    let client = TonReadonlyClient::connect(&config.ton)
+        .context("connect TON liteclient to check Cocoon wallet balance")?;
+    let snapshot = client
+        .accounts_snapshot(&config.cocoon_wallet_address, None)
+        .context("read Cocoon wallet balance")?;
+    Ok(snapshot.wallet.and_then(|wallet| wallet.balance))
+}
+
+fn wait_for_enter(prompt: &str) -> Result<()> {
+    print!("{prompt}");
+    io::stdout().flush().context("flush prompt")?;
+    let mut line = String::new();
+    io::stdin().read_line(&mut line).context("read Enter")?;
+    Ok(())
+}
+
+fn print_wallet_balance_problem(wallet_address: &str, current: u64, required: u64) {
+    let missing = required.saturating_sub(current);
+    println!();
+    println!("{} Cocoon wallet needs funding", color_status("warn"));
+    println!("Address: {wallet_address}");
+    println!("Current: {} TON", format_nanotons(current));
+    println!("Required: {} TON", format_nanotons(required));
+    println!("Missing: {} TON", format_nanotons(missing));
+}
+
+fn wallet_funding_required_from_error(
+    error: &anyhow::Error,
+) -> Option<&CocoonWalletFundingRequired> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<CocoonWalletFundingRequired>())
+}
+
+fn print_actionable_balance_error(error: &CocoonWalletFundingRequired) {
+    println!();
+    println!("{} Cocoon wallet needs funding", color_status("warn"));
+    println!("Address: {}", error.wallet_address);
+    println!("Current: {} TON", format_nanotons(error.current_balance));
+    println!("Required: {} TON", format_nanotons(error.required_balance));
+    println!("Missing: {} TON", format_nanotons(error.missing_balance));
+}
+
+fn format_nanotons(value: u64) -> String {
+    let whole = value / NANOTONS_PER_TON;
+    let fraction = value % NANOTONS_PER_TON;
+    format!("{whole}.{fraction:09}")
+}
+
+fn color_status(status: &str) -> &'static str {
+    match status {
+        "ok" => "\x1b[32mOK\x1b[0m",
+        "warn" => "\x1b[33m!\x1b[0m",
+        "info" => "\x1b[36m>\x1b[0m",
+        _ => "",
+    }
+}
+
 /// Checks that the configured secret matches the proxy-provided challenge hash.
 fn secret_hash_matches(secret: &str, expected: &[u8; 32]) -> bool {
     let digest = Sha256::digest(secret.as_bytes());
@@ -1529,6 +1793,7 @@ const fn tl_long_to_u64(value: i64) -> u64 {
 /// Converts the proxy authorization result into local payment status.
 fn payment_status_from_auth(
     auth: &cocoon::AuthorizationWithProxy<'_>,
+    verbosity: ConnectVerbosity,
 ) -> Result<AuthPaymentStatus> {
     match auth {
         cocoon::AuthorizationWithProxy::Success {
@@ -1536,9 +1801,11 @@ fn payment_status_from_auth(
             tokens_committed_to_db,
             max_tokens,
         } => {
-            println!(
-                "auth success: tokens_committed_to_db={tokens_committed_to_db} max_tokens={max_tokens}"
-            );
+            if verbosity.is_verbose() {
+                println!(
+                    "auth success: tokens_committed_to_db={tokens_committed_to_db} max_tokens={max_tokens}"
+                );
+            }
             Ok(payment_status_from_fields(
                 signed_payment,
                 *tokens_committed_to_db,
@@ -1698,7 +1965,12 @@ mod tests {
         let low_wallet = active_wallet(required_balance - 1);
         let error = validate_cocoon_wallet_can_send_control("wallet", &low_wallet)
             .expect_err("wallet below the Cocoon minimum must be rejected");
-        assert!(error.to_string().contains("minimum wallet balance"));
+        let funding_error = wallet_funding_required_from_error(&error)
+            .expect("low wallet balance must be reported as a structured funding error");
+        assert_eq!(funding_error.wallet_address, "wallet");
+        assert_eq!(funding_error.current_balance, required_balance - 1);
+        assert_eq!(funding_error.required_balance, required_balance);
+        assert_eq!(funding_error.missing_balance, 1);
 
         let funded_wallet = active_wallet(required_balance);
         assert_eq!(
@@ -1727,8 +1999,18 @@ mod tests {
         let error = validate_cocoon_wallet_can_send_control("wallet", &wallet)
             .expect_err("missing wallet account with zero balance must be rejected as underfunded");
 
-        assert!(error.to_string().contains("current=0 nanotons"));
-        assert!(error.to_string().contains("Top up the Cocoon wallet"));
+        let funding_error = wallet_funding_required_from_error(&error)
+            .expect("missing wallet account must be reported as a structured funding error");
+        assert_eq!(funding_error.wallet_address, "wallet");
+        assert_eq!(funding_error.current_balance, 0);
+        assert_eq!(
+            funding_error.required_balance,
+            COCOON_WALLET_MIN_BALANCE_NANOTONS
+        );
+        assert_eq!(
+            funding_error.missing_balance,
+            COCOON_WALLET_MIN_BALANCE_NANOTONS
+        );
     }
 
     #[test]

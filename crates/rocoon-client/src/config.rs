@@ -34,6 +34,8 @@ const DEFAULT_TON_QUERY_TIMEOUT_MILLIS: u64 = 5_000;
 pub struct RuntimeConfig {
     /// Path that was actually used for TOML loading.
     pub config_path: PathBuf,
+    /// Enables verbose CLI diagnostics.
+    pub verbose: bool,
     /// Cocoon proxy TCP address, for example `91.108.4.11:8888`.
     pub proxy_addr: String,
     /// Maximum duration for opening the initial TCP connection.
@@ -148,8 +150,8 @@ impl RuntimeConfig {
     /// fails, environment overrides cannot be parsed, or validation rejects the
     /// effective configuration.
     pub fn load() -> Result<Self> {
-        let (config_path, explicit_config_path) = config_path_from_args(env::args_os().skip(1))?;
-        let mut config = read_config(&config_path, explicit_config_path)?;
+        let cli = cli_args_from_args(env::args_os().skip(1))?;
+        let mut config = read_config(&cli.config_path, cli.explicit_config_path)?;
 
         if let Ok(value) = env::var("COCOON_PROXY_ADDR") {
             config.network.proxy_addr = value;
@@ -227,10 +229,11 @@ impl RuntimeConfig {
         let ton_config_path = config
             .ton
             .config_path
-            .map(|path| resolve_path_relative_to_config(path, &config_path));
+            .map(|path| resolve_path_relative_to_config(path, &cli.config_path));
 
         Ok(Self {
-            config_path,
+            config_path: cli.config_path,
+            verbose: cli.verbose,
             proxy_addr: config.network.proxy_addr,
             connect_timeout: Duration::from_secs(config.network.connect_timeout_secs),
             listen_addr: config.server.listen_addr,
@@ -310,31 +313,50 @@ impl Default for TonConfig {
 /// The boolean in the result marks whether the config path was explicitly
 /// provided. That distinction lets default `rocoon.toml` be optional while
 /// still failing fast for mistyped explicit config paths.
-fn config_path_from_args<I>(mut args: I) -> Result<(PathBuf, bool)>
+struct CliArgs {
+    config_path: PathBuf,
+    explicit_config_path: bool,
+    verbose: bool,
+}
+
+fn cli_args_from_args<I>(args: I) -> Result<CliArgs>
 where
     I: Iterator<Item = OsString>,
 {
-    let Some(first) = args.next() else {
-        return Ok((PathBuf::from(DEFAULT_CONFIG_PATH), false));
+    let mut cli = CliArgs {
+        config_path: PathBuf::from(DEFAULT_CONFIG_PATH),
+        explicit_config_path: false,
+        verbose: false,
     };
+    let mut args = args;
 
-    let first = first
-        .into_string()
-        .map_err(|_| anyhow!("argument is not valid UTF-8"))?;
+    while let Some(arg) = args.next() {
+        let arg = arg
+            .into_string()
+            .map_err(|_| anyhow!("argument is not valid UTF-8"))?;
 
-    match first.as_str() {
-        "--config" | "-c" => {
-            let path = args
-                .next()
-                .ok_or_else(|| anyhow!("missing path after {first}"))?;
-            if let Some(extra) = args.next() {
-                anyhow::bail!("unexpected extra argument: {}", extra.to_string_lossy());
+        match arg.as_str() {
+            "--config" | "-c" => {
+                if cli.explicit_config_path {
+                    anyhow::bail!("--config was provided more than once");
+                }
+                let path = args
+                    .next()
+                    .ok_or_else(|| anyhow!("missing path after {arg}"))?;
+                cli.config_path = PathBuf::from(path);
+                cli.explicit_config_path = true;
             }
-            Ok((PathBuf::from(path), true))
+            "--verbose" | "-v" => {
+                cli.verbose = true;
+            }
+            "--help" | "-h" => {
+                anyhow::bail!("usage: rocoon [--config path] [--verbose]");
+            }
+            _ => anyhow::bail!("unknown argument: {arg}; use --config path or --verbose"),
         }
-        "--help" | "-h" => anyhow::bail!("usage: rocoon [--config path]"),
-        _ => anyhow::bail!("unknown argument: {first}; use --config path"),
     }
+
+    Ok(cli)
 }
 
 /// Reads and deserializes the TOML file, or returns defaults when allowed.
