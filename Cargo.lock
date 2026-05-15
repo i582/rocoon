@@ -325,14 +325,50 @@ name = "rocoon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "rocoon-client",
+ "rocoon-openai-server",
+]
+
+[[package]]
+name = "rocoon-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rocoon-protocol",
+ "rocoon-transport",
+ "serde",
+ "sha2",
+ "toml",
+]
+
+[[package]]
+name = "rocoon-openai-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rocoon-client",
+ "serde_json",
+]
+
+[[package]]
+name = "rocoon-protocol"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tl-proto",
+]
+
+[[package]]
+name = "rocoon-transport"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
  "rand",
  "rcgen",
+ "rocoon-protocol",
  "rustls",
- "serde",
- "serde_json",
  "sha2",
  "tl-proto",
- "toml",
 ]
 
 [[package]]

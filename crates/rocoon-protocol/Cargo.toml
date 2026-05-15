@@ -1,0 +1,15 @@
+[package]
+name = "rocoon-protocol"
+version.workspace = true
+edition.workspace = true
+description = "TL protocol bindings and encoders for Cocoon."
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tl-proto.workspace = true

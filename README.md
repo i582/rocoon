@@ -16,6 +16,18 @@ Current scope:
 - Implement `/v1/chat/completions` and `/v1/completions` through `client.runQueryEx`.
 - Collect streamed Cocoon answer parts before returning the local HTTP response.
 
+Workspace layout:
+
+- `rocoon-protocol`: Cocoon TL objects, encoders, and decoders.
+- `rocoon-transport`: reusable Cocoon proxy transport stack: TCP PoW, RA-TLS,
+  `tcp.query`, `tcp.packet`, ping/pong, and `runQueryEx` answer aggregation.
+- `rocoon-client`: high-level Cocoon client API: proxy authorization, model
+  discovery, and completion requests.
+- `rocoon-openai-server`: local OpenAI-compatible HTTP bridge over
+  `rocoon-client`.
+- `rocoon`: thin binary that loads config, connects the client, and starts the
+  HTTP bridge.
+
 Not implemented yet:
 
 - TON root contract reading.
@@ -33,8 +45,9 @@ Checks:
 
 ```bash
 cargo fmt --all
-cargo clippy --all-targets --all-features
-cargo check
+cargo clippy --workspace --all-targets --all-features --no-deps -- -D warnings
+cargo check --workspace
+cargo test --workspace
 ```
 
 Config:

@@ -1,8 +1,8 @@
-//! Cocoon TCP session framing.
+//! Cocoon proxy transport stack.
 //!
-//! After `PoW` and RA-TLS, Cocoon uses a compact frame protocol with send/receive
-//! sequence numbers and TL packets inside each frame. This module owns that
-//! framing layer and provides two request styles: classic `tcp.query` for
+//! This crate owns the reusable transport layers needed to talk to a Cocoon
+//! proxy: TCP proof-of-work, RA-TLS setup, and the Cocoon frame/session protocol.
+//! The session layer provides two request styles: classic `tcp.query` for
 //! metadata/auth and raw `tcp.packet` streaming for `client.runQueryEx`.
 
 use std::io::{Read, Write};
@@ -10,9 +10,11 @@ use std::io::{Read, Write};
 use anyhow::{Context, Result};
 use rand::Rng;
 use rand::RngCore;
+use rocoon_protocol::{self as cocoon, RunQueryOptions};
 use tl_proto::{TlRead, TlWrite};
 
-use crate::cocoon::{self, RunQueryOptions};
+pub mod pow;
+pub mod ratls;
 
 const MAX_FRAME_SIZE: u32 = 1 << 20;
 
@@ -99,6 +101,12 @@ pub struct RunQueryOutput {
 
 impl<RW: Read + Write> Session<RW> {
     /// Starts a logical Cocoon session over the supplied transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the initial `tcp.connect` frame cannot be written,
+    /// the response frame cannot be read, the response is not `tcp.connected`,
+    /// or the acknowledged session id does not match the requested one.
     pub fn connect(io: RW) -> Result<(Self, TcpConnected)> {
         let mut session = Self {
             io,
@@ -132,6 +140,11 @@ impl<RW: Read + Write> Session<RW> {
     ///
     /// This is used for metadata and authorization calls where the proxy returns
     /// a single `tcp.queryAnswer` or `tcp.queryError`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if frame IO fails, the proxy returns a matching
+    /// `tcp.queryError`, or a matching response cannot be decoded.
     pub fn make_request(&mut self, request_payload: &[u8]) -> Result<Vec<u8>> {
         let query_id = rand::thread_rng().gen_range(0..i64::MAX);
         let packet = tl_proto::serialize(TcpQuery {
@@ -170,6 +183,12 @@ impl<RW: Read + Write> Session<RW> {
     /// The first matching `Answer` packet contains the encoded HTTP response.
     /// Later `Part` packets contain more response body bytes. The optional
     /// `final_info` flag marks the terminal packet.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if frame IO fails, the proxy returns a matching query
+    /// error, answer packets arrive in an invalid order, or sequence/frame
+    /// validation fails.
     pub fn run_client_query_ex(
         &mut self,
         model: &str,

@@ -31,6 +31,11 @@ struct Challenge {
 }
 
 /// Completes the proxy `PoW` exchange on an open TCP stream.
+///
+/// # Errors
+///
+/// Returns an error if the proxy challenge cannot be read, contains an
+/// unexpected magic/difficulty, or the solved nonce cannot be written back.
 pub fn handshake<RW: Read + Write>(io: &mut RW) -> Result<PowStats> {
     let challenge = read_challenge(io)?;
     let start = Instant::now();

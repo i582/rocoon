@@ -1,0 +1,16 @@
+[package]
+name = "rocoon-openai-server"
+version.workspace = true
+edition.workspace = true
+description = "OpenAI-compatible local HTTP bridge for rocoon-client."
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+rocoon-client = { path = "../rocoon-client" }
+serde_json.workspace = true

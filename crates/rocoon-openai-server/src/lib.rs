@@ -14,7 +14,7 @@ use std::thread;
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 
-use crate::client::{CocoonClient, HttpExchange};
+use rocoon_client::{CocoonClient, HttpExchange};
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
@@ -51,6 +51,12 @@ struct CompletionRequest {
 /// Supported endpoints are `/health`, `/v1/models`, `/v1/chat/completions`,
 /// and `/v1/completions`. Each accepted TCP connection is handled on a separate
 /// thread while access to the underlying Cocoon client remains serialized.
+///
+/// # Errors
+///
+/// Returns an error if the listener cannot bind or an incoming TCP connection
+/// cannot be accepted. Per-request failures are converted to JSON HTTP errors
+/// and do not stop the listener.
 pub fn serve(listen_addr: &str, client: CocoonClient, defaults: Defaults) -> Result<()> {
     let listener = TcpListener::bind(listen_addr).with_context(|| format!("bind {listen_addr}"))?;
     println!("OpenAI-compatible HTTP server listening on http://{listen_addr}");

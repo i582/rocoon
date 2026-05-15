@@ -26,6 +26,7 @@ pub struct RatlsStream {
 
 impl RatlsStream {
     /// Returns the DER length of the first server certificate, or zero if none.
+    #[must_use]
     pub const fn server_cert_der_len(&self) -> usize {
         self.server_cert_der_len
     }
@@ -48,7 +49,14 @@ impl std::io::Write for RatlsStream {
 }
 
 /// Opens the RA-TLS-like client connection over an already connected TCP stream.
+///
+/// # Errors
+///
+/// Returns an error if the ephemeral client certificate cannot be generated, the
+/// rustls client configuration cannot be built, or the TLS handshake fails.
 pub fn connect(stream: TcpStream) -> Result<RatlsStream> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let (cert, key) = generate_ephemeral_ed25519_cert()?;
 
     let mut config = ClientConfig::builder()

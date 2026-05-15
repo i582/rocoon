@@ -115,7 +115,7 @@ pub struct ConnectedToProxy<'tl> {
 
 /// Proxy metadata returned during connection setup.
 #[derive(Debug, TlRead)]
-#[allow(dead_code)]
+#[allow(dead_code, clippy::manual_non_exhaustive)]
 pub struct ProxyParams<'tl> {
     #[tl(flags)]
     flags: (),
@@ -191,7 +191,7 @@ pub struct WorkerTypeV2<'tl> {
 
 /// Worker capacity and price metadata returned by the proxy.
 #[derive(Debug, TlRead)]
-#[allow(dead_code)]
+#[allow(dead_code, clippy::manual_non_exhaustive)]
 pub struct WorkerInstanceV2 {
     #[tl(flags)]
     flags: (),
@@ -205,7 +205,7 @@ pub struct WorkerInstanceV2 {
 /// The current HTTP bridge does not expose this object directly, but it is part
 /// of the TL schema and marks the end of a streamed Cocoon answer.
 #[derive(Debug, TlRead)]
-#[allow(dead_code)]
+#[allow(dead_code, clippy::manual_non_exhaustive)]
 pub struct QueryFinalInfo<'tl> {
     #[tl(flags)]
     flags: (),
@@ -274,6 +274,7 @@ pub enum QueryAnswerEx<'tl> {
 }
 
 /// Encodes `client.connectToProxy`.
+#[must_use]
 pub fn encode_connect_to_proxy(owner_address: &str, min_config_version: i32) -> Vec<u8> {
     tl_proto::serialize(ClientConnectToProxy {
         params: ClientParams {
@@ -288,6 +289,7 @@ pub fn encode_connect_to_proxy(owner_address: &str, min_config_version: i32) -> 
 }
 
 /// Encodes `client.authorizeWithProxyShort`.
+#[must_use]
 pub fn encode_authorize_with_proxy_short(secret: &str) -> Vec<u8> {
     tl_proto::serialize(ClientAuthorizeWithProxyShort {
         data: secret.as_bytes(),
@@ -295,6 +297,7 @@ pub fn encode_authorize_with_proxy_short(secret: &str) -> Vec<u8> {
 }
 
 /// Encodes `client.getWorkerTypesV2`.
+#[must_use]
 pub fn encode_get_worker_types_v2() -> Vec<u8> {
     tl_proto::serialize(ClientGetWorkerTypesV2)
 }
@@ -302,6 +305,7 @@ pub fn encode_get_worker_types_v2() -> Vec<u8> {
 /// Encodes Cocoon's internal `http.request` object.
 ///
 /// This is the request that Cocoon workers receive through `client.runQueryEx`.
+#[must_use]
 pub fn encode_http_request(
     method: &str,
     url: &str,
@@ -328,6 +332,7 @@ pub fn encode_http_request(
 ///
 /// This is intentionally manual rather than `TlWrite`-derived because exact
 /// field order and primitive encoding are critical for proxy compatibility.
+#[must_use]
 pub fn encode_run_query_ex(
     model: &str,
     query: &[u8],
@@ -357,27 +362,51 @@ pub fn encode_run_query_ex(
 }
 
 /// Decodes `client.connectedToProxy`.
+///
+/// # Errors
+///
+/// Returns an error when `raw` is not a valid boxed `client.connectedToProxy`
+/// TL object.
 pub fn decode_connected_to_proxy(raw: &[u8]) -> Result<ConnectedToProxy<'_>> {
     tl_proto::deserialize::<ConnectedToProxy>(raw).context("decode client.connectedToProxy")
 }
 
 /// Decodes `client.authorizationWithProxy`.
+///
+/// # Errors
+///
+/// Returns an error when `raw` is not a valid boxed
+/// `client.authorizationWithProxy` TL object.
 pub fn decode_authorization_with_proxy(raw: &[u8]) -> Result<AuthorizationWithProxy<'_>> {
     tl_proto::deserialize::<AuthorizationWithProxy>(raw)
         .context("decode client.authorizationWithProxy")
 }
 
 /// Decodes `client.workerTypesV2`.
+///
+/// # Errors
+///
+/// Returns an error when `raw` is not a valid boxed `client.workerTypesV2` TL
+/// object.
 pub fn decode_worker_types_v2(raw: &[u8]) -> Result<WorkerTypesV2<'_>> {
     tl_proto::deserialize::<WorkerTypesV2>(raw).context("decode client.workerTypesV2")
 }
 
 /// Decodes any `client.queryAnswer*Ex` packet.
+///
+/// # Errors
+///
+/// Returns an error when `raw` is not one of Cocoon's boxed query answer TL
+/// variants.
 pub fn decode_query_answer_ex(raw: &[u8]) -> Result<QueryAnswerEx<'_>> {
     tl_proto::deserialize::<QueryAnswerEx>(raw).context("decode client.QueryAnswerEx")
 }
 
 /// Decodes Cocoon's internal `http.response` object.
+///
+/// # Errors
+///
+/// Returns an error when `raw` is not a valid boxed `http.response` TL object.
 pub fn decode_http_response(raw: &[u8]) -> Result<HttpResponse<'_>> {
     tl_proto::deserialize::<HttpResponse>(raw).context("decode http.response")
 }

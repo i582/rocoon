@@ -1,24 +1,16 @@
-mod client;
-mod cocoon;
-mod config;
-mod pow;
-mod ratls;
-mod server;
-mod session;
-
 use anyhow::Result;
+use rocoon_client::{CocoonClient, RuntimeConfig};
+use rocoon_openai_server::{Defaults, serve};
 
 fn main() -> Result<()> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
-    let config = config::RuntimeConfig::load()?;
+    let config = RuntimeConfig::load()?;
     println!("loaded config: {}", config.config_path.display());
 
-    let client = client::CocoonClient::connect(&config)?;
-    let defaults = server::Defaults {
+    let client = CocoonClient::connect(&config)?;
+    let defaults = Defaults {
         max_coefficient: config.max_coefficient,
         max_tokens: config.max_tokens,
         timeout: config.request_timeout,
     };
-    server::serve(&config.listen_addr, client, defaults)
+    serve(&config.listen_addr, client, defaults)
 }

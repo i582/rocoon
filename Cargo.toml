@@ -1,19 +1,23 @@
-[package]
-name = "rocoon"
+[workspace]
+members = [
+    "crates/rocoon-client",
+    "crates/rocoon-openai-server",
+    "crates/rocoon-protocol",
+    "crates/rocoon-transport",
+]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-description = "Minimal Rust bridge for the Cocoon proxy protocol."
 repository = "https://github.com/i582/rocoon"
 license = "MIT OR Apache-2.0"
-keywords = ["cocoon", "ton", "openai", "proxy"]
-categories = ["command-line-utilities", "network-programming"]
-publish = false
 
-[lints.rust]
+[workspace.lints.rust]
 unsafe_code = "forbid"
 warnings = "deny"
 
-[lints.clippy]
+[workspace.lints.clippy]
 all = "deny"
 cargo = "deny"
 nursery = "deny"
@@ -25,7 +29,7 @@ todo = "deny"
 unimplemented = "deny"
 panic = "deny"
 
-[dependencies]
+[workspace.dependencies]
 anyhow = "1"
 rand = "0.8"
 rcgen = { version = "0.13", features = ["crypto", "pem"] }
@@ -35,3 +39,22 @@ serde_json = "1"
 sha2 = "0.10"
 tl-proto = "0.5"
 toml = "0.8"
+
+[package]
+name = "rocoon"
+version.workspace = true
+edition.workspace = true
+description = "Minimal Rust bridge for the Cocoon proxy protocol."
+repository.workspace = true
+license.workspace = true
+keywords = ["cocoon", "ton", "openai", "proxy"]
+categories = ["command-line-utilities", "network-programming"]
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+rocoon-client = { path = "crates/rocoon-client" }
+rocoon-openai-server = { path = "crates/rocoon-openai-server" }

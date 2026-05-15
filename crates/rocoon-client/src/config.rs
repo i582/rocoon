@@ -97,6 +97,12 @@ impl RuntimeConfig {
     /// Missing default config is allowed and falls back to built-in defaults.
     /// Explicit `--config` paths must exist. Environment variables are applied
     /// after TOML loading and before validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an explicit config cannot be read, TOML parsing
+    /// fails, environment overrides cannot be parsed, or validation rejects the
+    /// effective configuration.
     pub fn load() -> Result<Self> {
         let (config_path, explicit_config_path) = config_path_from_args(env::args_os().skip(1))?;
         let mut config = read_config(&config_path, explicit_config_path)?;

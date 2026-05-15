@@ -1,20 +1,19 @@
 //! High-level Cocoon client orchestration.
 //!
-//! This module ties the lower protocol layers together: TCP connect, `PoW`,
-//! RA-TLS, Cocoon session framing, proxy authorization, model discovery, and
-//! inference requests. It exposes domain-level methods used by the local HTTP
-//! server instead of leaking TL objects or frame handling into the API layer.
+//! This module ties the lower protocol and transport crates together: TCP
+//! connect, `PoW`, RA-TLS, Cocoon session framing, proxy authorization, model
+//! discovery, and inference requests. It exposes domain-level methods used by
+//! the local HTTP server instead of leaking TL objects or frame handling into
+//! the API layer.
 
 use std::net::{TcpStream, ToSocketAddrs};
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
-use crate::cocoon::{self, RunQueryOptions, WorkerInstanceV2, WorkerTypeV2};
 use crate::config::RuntimeConfig;
-use crate::pow;
-use crate::ratls;
-use crate::session::{RunQueryOutput, Session};
+use rocoon_protocol::{self as cocoon, RunQueryOptions, WorkerInstanceV2, WorkerTypeV2};
+use rocoon_transport::{RunQueryOutput, Session, pow, ratls};
 
 /// Authenticated Cocoon proxy client.
 ///
@@ -67,6 +66,11 @@ impl CocoonClient {
     /// The handshake sequence is:
     /// TCP connect -> Cocoon `PoW` -> RA-TLS -> `tcp.connect` session ->
     /// `client.connectToProxy` -> `client.authorizeWithProxyShort`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if DNS/TCP connection, `PoW`, RA-TLS, session framing,
+    /// proxy authorization, or config-derived short authentication fails.
     pub fn connect(config: &RuntimeConfig) -> Result<Self> {
         let addr = &config.proxy_addr;
         println!("connecting to Cocoon proxy at {addr}");
@@ -118,6 +122,11 @@ impl CocoonClient {
     ///
     /// This powers `/v1/models`. A reconnect is attempted once because metadata
     /// calls are cheap and stale sessions are common after proxy-side closes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request cannot be sent, the reconnect attempt
+    /// fails, or the proxy response is not a valid `client.workerTypesV2`.
     pub fn get_worker_types_v2(&mut self) -> Result<Vec<ModelInfo>> {
         let request = cocoon::encode_get_worker_types_v2();
         let response = match self.session.make_request(&request) {
@@ -140,6 +149,12 @@ impl CocoonClient {
     /// `body` is already sanitized JSON from the local HTTP layer. The method
     /// wraps it into Cocoon's internal `http.request`, sends `client.runQueryEx`,
     /// gathers all answer parts, and decodes Cocoon's `http.response`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request cannot be sent, the proxy returns a query
+    /// error, the response stream is malformed, or the worker response cannot be
+    /// decoded as Cocoon's internal `http.response`.
     pub fn run_chat_completion(
         &mut self,
         model: &str,
