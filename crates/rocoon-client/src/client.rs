@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
-use crate::config::RuntimeConfig;
+use crate::config::{RuntimeConfig, TonRuntimeConfig};
 use crate::ton_readonly::{
     COCOON_WALLET_RESERVE_NANOTONS, CONTROL_MESSAGE_VALUE_NANOTONS, ClientContractSnapshot,
     TonAccountState, TonControlAction, TonControlPreparedMessage, TonControlRequest,
@@ -23,6 +23,7 @@ use rocoon_protocol::{self as cocoon, RunQueryOptions, WorkerInstanceV2, WorkerT
 use rocoon_transport::{QueryFinalInfo, RunQueryOutput, Session, pow, ratls};
 
 const CONTROL_RESEND_INTERVAL: Duration = Duration::from_secs(30);
+const COCOON_CLIENT_CONTRACT_STATE_CLOSED: u8 = 2;
 
 /// Authenticated Cocoon proxy client.
 ///
@@ -40,6 +41,7 @@ pub struct CocoonClient {
     config: RuntimeConfig,
     control_request: Option<PendingControlRequest>,
     wallet_transfer_request: Option<PendingWalletTransferRequest>,
+    client_contract_close_confirmed: bool,
 }
 
 /// Snapshot of local client state that can be exposed through `/stats`.
@@ -227,6 +229,7 @@ impl CocoonClient {
             config: config.clone(),
             control_request: None,
             wallet_transfer_request: None,
+            client_contract_close_confirmed: false,
         })
     }
 
@@ -341,8 +344,8 @@ impl CocoonClient {
             wallet_seed: self.config.node_wallet_key.seed(),
         };
         let prepared = self.ton_readonly.prepare_client_control(&request)?;
-        self.control_request = Some(PendingControlRequest::new(&prepared, client_contract));
         let result = self.ton_readonly.send_prepared_control(&prepared)?;
+        self.control_request = Some(PendingControlRequest::new(&prepared, client_contract));
         Ok(result)
     }
 
@@ -362,6 +365,7 @@ impl CocoonClient {
         &mut self,
         destination_address: Option<&str>,
         reserve_nanotons: u64,
+        allow_untracked_closed: bool,
     ) -> Result<TonWalletTransferResult> {
         let ton = self
             .ton_readonly
@@ -385,6 +389,11 @@ impl CocoonClient {
             anyhow::bail!("wallet transaction is already running");
         }
         validate_client_contract_closed_for_sweep(client_contract)?;
+        if !allow_untracked_closed && !self.client_contract_close_confirmed {
+            anyhow::bail!(
+                "client contract close was not confirmed by this rocoon process; call /request/close first or pass force=true for an already closed contract"
+            );
+        }
 
         let wallet = ton
             .wallet
@@ -408,8 +417,8 @@ impl CocoonClient {
             amount,
         };
         let prepared = self.ton_readonly.prepare_wallet_transfer(&request)?;
-        self.wallet_transfer_request = Some(PendingWalletTransferRequest::new(&prepared, wallet));
         let result = self.ton_readonly.send_prepared_wallet_transfer(&prepared)?;
+        self.wallet_transfer_request = Some(PendingWalletTransferRequest::new(&prepared, wallet));
         Ok(result)
     }
 
@@ -489,21 +498,28 @@ impl CocoonClient {
     fn reconnect(&mut self) -> Result<()> {
         let control_request = self.control_request.clone();
         let wallet_transfer_request = self.wallet_transfer_request.clone();
+        let client_contract_close_confirmed = self.client_contract_close_confirmed;
         let mut replacement = Self::connect(&self.config)?;
         replacement.control_request = control_request;
         replacement.wallet_transfer_request = wallet_transfer_request;
+        replacement.client_contract_close_confirmed = client_contract_close_confirmed;
         *self = replacement;
         Ok(())
     }
 
     fn refresh_control_request(&mut self, client_contract: &ClientContractSnapshot) {
-        if self
-            .control_request
-            .as_ref()
-            .is_some_and(|request| request.is_completed_by(client_contract))
-        {
-            self.control_request = None;
+        let Some(request) = self.control_request.as_ref() else {
+            return;
+        };
+        if !request.is_completed_by(client_contract) {
+            return;
         }
+        if request.action == TonControlAction::RequestRefund
+            && client_contract.state_raw == Some(COCOON_CLIENT_CONTRACT_STATE_CLOSED)
+        {
+            self.client_contract_close_confirmed = true;
+        }
+        self.control_request = None;
     }
 
     fn refresh_wallet_transfer_request(&mut self, wallet: &TonWalletSnapshot) {
@@ -693,8 +709,14 @@ impl PendingWalletTransferRequest {
 /// Initialization state for optional read-only TON diagnostics.
 enum TonReadonlyState {
     Disabled,
-    Ready(TonReadonlyClient),
-    Failed(String),
+    Ready {
+        config: TonRuntimeConfig,
+        client: TonReadonlyClient,
+    },
+    Failed {
+        config: TonRuntimeConfig,
+        error: String,
+    },
 }
 
 impl TonReadonlyState {
@@ -703,18 +725,60 @@ impl TonReadonlyState {
             return Self::Disabled;
         }
         match TonReadonlyClient::connect(&config.ton) {
-            Ok(client) => Self::Ready(client),
-            Err(error) => Self::Failed(format!("{error:#}")),
+            Ok(client) => Self::Ready {
+                config: config.ton.clone(),
+                client,
+            },
+            Err(error) => Self::Failed {
+                config: config.ton.clone(),
+                error: format!("{error:#}"),
+            },
         }
     }
 
-    fn snapshot(&self, wallet_address: &str, client_contract_address: &str) -> TonReadonlySnapshot {
+    fn snapshot(
+        &mut self,
+        wallet_address: &str,
+        client_contract_address: &str,
+    ) -> TonReadonlySnapshot {
         match self {
             Self::Disabled => TonReadonlySnapshot::disabled(),
-            Self::Failed(error) => TonReadonlySnapshot::failed(error.clone()),
-            Self::Ready(client) => client
-                .accounts_snapshot(wallet_address, Some(client_contract_address))
-                .unwrap_or_else(|error| TonReadonlySnapshot::failed(format!("{error:#}"))),
+            Self::Failed { config, error } => {
+                eprintln!("TON liteclient is unavailable, reconnecting: {error}");
+                let config = config.clone();
+                match TonReadonlyClient::connect(&config) {
+                    Ok(client) => {
+                        *self = Self::Ready { config, client };
+                        self.snapshot(wallet_address, client_contract_address)
+                    }
+                    Err(reconnect_error) => TonReadonlySnapshot::failed(format!(
+                        "{error}; reconnect failed: {reconnect_error:#}"
+                    )),
+                }
+            }
+            Self::Ready { config, client } => {
+                match client.accounts_snapshot(wallet_address, Some(client_contract_address)) {
+                    Ok(snapshot) => snapshot,
+                    Err(first_error) => {
+                        eprintln!("TON snapshot failed, reconnecting liteclient: {first_error:#}");
+                        match TonReadonlyClient::connect(config) {
+                            Ok(replacement) => {
+                                *client = replacement;
+                                client
+                                    .accounts_snapshot(wallet_address, Some(client_contract_address))
+                                    .unwrap_or_else(|second_error| {
+                                        TonReadonlySnapshot::failed(format!(
+                                            "{first_error:#}; retry after reconnect failed: {second_error:#}"
+                                        ))
+                                    })
+                            }
+                            Err(reconnect_error) => TonReadonlySnapshot::failed(format!(
+                                "{first_error:#}; reconnect failed: {reconnect_error:#}"
+                            )),
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -724,8 +788,8 @@ impl TonReadonlyState {
     ) -> Result<TonControlPreparedMessage> {
         match self {
             Self::Disabled => anyhow::bail!("TON liteclient is disabled"),
-            Self::Failed(error) => anyhow::bail!("TON liteclient is unavailable: {error}"),
-            Self::Ready(_) => TonReadonlyClient::prepare_client_control_message(request),
+            Self::Failed { error, .. } => anyhow::bail!("TON liteclient is unavailable: {error}"),
+            Self::Ready { .. } => TonReadonlyClient::prepare_client_control_message(request),
         }
     }
 
@@ -735,8 +799,8 @@ impl TonReadonlyState {
     ) -> Result<TonControlResult> {
         match self {
             Self::Disabled => anyhow::bail!("TON liteclient is disabled"),
-            Self::Failed(error) => anyhow::bail!("TON liteclient is unavailable: {error}"),
-            Self::Ready(client) => client.send_prepared_control_message(message),
+            Self::Failed { error, .. } => anyhow::bail!("TON liteclient is unavailable: {error}"),
+            Self::Ready { client, .. } => client.send_prepared_control_message(message),
         }
     }
 
@@ -746,8 +810,8 @@ impl TonReadonlyState {
     ) -> Result<TonWalletTransferPreparedMessage> {
         match self {
             Self::Disabled => anyhow::bail!("TON liteclient is disabled"),
-            Self::Failed(error) => anyhow::bail!("TON liteclient is unavailable: {error}"),
-            Self::Ready(_) => TonReadonlyClient::prepare_wallet_transfer_message(request),
+            Self::Failed { error, .. } => anyhow::bail!("TON liteclient is unavailable: {error}"),
+            Self::Ready { .. } => TonReadonlyClient::prepare_wallet_transfer_message(request),
         }
     }
 
@@ -757,16 +821,16 @@ impl TonReadonlyState {
     ) -> Result<TonWalletTransferResult> {
         match self {
             Self::Disabled => anyhow::bail!("TON liteclient is disabled"),
-            Self::Failed(error) => anyhow::bail!("TON liteclient is unavailable: {error}"),
-            Self::Ready(client) => client.send_prepared_wallet_transfer_message(message),
+            Self::Failed { error, .. } => anyhow::bail!("TON liteclient is unavailable: {error}"),
+            Self::Ready { client, .. } => client.send_prepared_wallet_transfer_message(message),
         }
     }
 
     fn resend_external_message(&self, message: &[u8]) -> Result<u32> {
         match self {
             Self::Disabled => anyhow::bail!("TON liteclient is disabled"),
-            Self::Failed(error) => anyhow::bail!("TON liteclient is unavailable: {error}"),
-            Self::Ready(client) => client.send_raw_message(message),
+            Self::Failed { error, .. } => anyhow::bail!("TON liteclient is unavailable: {error}"),
+            Self::Ready { client, .. } => client.send_raw_message(message),
         }
     }
 }
@@ -779,7 +843,7 @@ fn validate_client_contract_closed_for_sweep(snapshot: &ClientContractSnapshot) 
         );
     }
     match snapshot.state_raw {
-        Some(2) => Ok(()),
+        Some(COCOON_CLIENT_CONTRACT_STATE_CLOSED) => Ok(()),
         Some(state_raw) => {
             anyhow::bail!(
                 "client contract is not closed yet: {}",

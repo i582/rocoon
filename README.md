@@ -129,8 +129,9 @@ Control endpoints:
 
 - `GET/POST /request/withdraw` sends `owner_client_withdraw` to the current client contract.
 - `GET/POST /request/close` sends `owner_client_request_refund` to the current client contract.
-- `GET/POST /wallet/withdraw` sends the sweepable Cocoon wallet balance to `client.owner_address` after the client contract is already `closed`.
+- `GET/POST /wallet/withdraw` sends the sweepable Cocoon wallet balance to `client.owner_address` after `/request/close` was confirmed by this `rocoon` process.
 - `/wallet/withdraw` keeps `100000000` nanotons by default for fees; override with `?reserve_nanotons=<value>` or JSON `{"reserve_nanotons":100000000}`.
+- If the contract was already closed before this process started, pass `?force=true` after checking `/stats.client_contract.state`.
 
 When the proxy returns `auth: short`, `rocoon` uses `client.secret` or
 `COCOON_CLIENT_SECRET` to call `client.authorizeWithProxyShort`.
