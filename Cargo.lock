@@ -1825,6 +1825,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "owo-colors"
+version = "4.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d211803b9b6b570f68772237e415a029d5a50c65d382910b879fb19d3271f94d"
+
+[[package]]
 name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2275,6 +2281,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "owo-colors",
  "rocoon-client",
  "rocoon-openai-server",
 ]

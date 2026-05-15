@@ -117,6 +117,9 @@ Cocoon wallet. `close` sends `owner_client_request_refund`. `withdraw` or
 `--to`. If proxy discovery cannot resolve an already closed client contract,
 `rocoon` first tries the locally cached client contract from `.rocoon-state`;
 if there is no matching cache, pass the contract address with `--client-contract`.
+When the proxy reports that the cached client contract is closing or closed,
+`start` records that in `.rocoon-state` and tells you to generate a new
+`client.node_wallet_key` before starting again.
 
 Environment overrides:
 

@@ -5,6 +5,8 @@
 //! The session layer provides two request styles: classic `tcp.query` for
 //! metadata/auth and raw `tcp.packet` streaming for `client.runQueryEx`.
 
+use std::error::Error;
+use std::fmt;
 use std::io::{Read, Write};
 use std::time::Duration;
 
@@ -124,6 +126,47 @@ pub struct RunQueryOutput {
     pub final_info: Option<QueryFinalInfo>,
 }
 
+/// Error returned by the proxy for a matching `tcp.query`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryError {
+    code: i32,
+    message: String,
+}
+
+impl QueryError {
+    /// Creates a structured proxy query error.
+    pub fn new(code: i32, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    /// Proxy-specific error code.
+    #[must_use]
+    pub const fn code(&self) -> i32 {
+        self.code
+    }
+
+    /// Proxy-provided error text.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for QueryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "tcp.queryError code={}: {}",
+            self.code, self.message
+        )
+    }
+}
+
+impl Error for QueryError {}
+
 impl<RW: Read + Write> Session<RW> {
     /// Starts a logical Cocoon session over the supplied transport.
     ///
@@ -188,8 +231,9 @@ impl<RW: Read + Write> Session<RW> {
             match packet {
                 TcpPacket::QueryAnswer { id, data } if id == query_id => return Ok(data.to_vec()),
                 TcpPacket::QueryError { id, code, message } if id == query_id => {
-                    let message = std::str::from_utf8(message).unwrap_or("<non-utf8>");
-                    anyhow::bail!("tcp.queryError code={code}: {message}");
+                    let message = std::str::from_utf8(message)
+                        .map_or_else(|_| "<non-utf8>".to_string(), ToOwned::to_owned);
+                    return Err(QueryError::new(code, message).into());
                 }
                 TcpPacket::Ping { id } => {
                     let pong = tl_proto::serialize(TcpPong { id });

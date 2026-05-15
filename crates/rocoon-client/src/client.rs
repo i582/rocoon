@@ -29,7 +29,7 @@ use crate::ton_readonly::{
     TonWalletTransferRequest, TonWalletTransferResult,
 };
 use rocoon_protocol::{self as cocoon, RunQueryOptions, WorkerInstanceV2, WorkerTypeV2};
-use rocoon_transport::{QueryFinalInfo, RunQueryOutput, Session, pow, ratls};
+use rocoon_transport::{QueryError, QueryFinalInfo, RunQueryOutput, Session, pow, ratls};
 
 const CONTROL_RESEND_INTERVAL: Duration = Duration::from_secs(30);
 const AUTH_REQUEST_TIMEOUT: Duration = Duration::from_mins(5);
@@ -38,6 +38,8 @@ const BALANCE_CHECK_MAX_SECS: f64 = 2.0;
 const PAYMENT_COMPARE_MIN_SECS: f64 = 10.0;
 const PAYMENT_COMPARE_MAX_SECS: f64 = 20.0;
 const COCOON_CLIENT_CONTRACT_STATE_CLOSED: u8 = 2;
+const PROXY_CLIENT_CLOSING_QUERY_ERROR_CODE: i32 = 602;
+const PROXY_CLIENT_CLOSING_QUERY_ERROR_MESSAGE: &str = "client is closing";
 const INTERACTIVE_REQUIRED_WALLET_BALANCE_NANOTONS: u64 = 20_000_000_000;
 const NANOTONS_PER_TON: u64 = 1_000_000_000;
 const SECRET_HASH_CONFIRM_ATTEMPTS: usize = 30;
@@ -90,6 +92,28 @@ pub struct CocoonClient {
     next_balance_check_at: Instant,
     next_payment_compare_at: Instant,
     verbosity: ConnectVerbosity,
+}
+
+/// Proxy rejection that means the configured Cocoon wallet cannot start again.
+#[derive(Debug)]
+pub struct ClientContractClosedOrClosing;
+
+impl fmt::Display for ClientContractClosedOrClosing {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("client contract is closing or closed")
+    }
+}
+
+impl Error for ClientContractClosedOrClosing {}
+
+/// Returns true when a failure chain contains a closed/closing contract proxy rejection.
+#[must_use]
+pub fn is_client_contract_closed_or_closing_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<ClientContractClosedOrClosing>()
+            .is_some()
+    })
 }
 
 /// Snapshot of local client state that can be exposed through `/stats`.
@@ -240,6 +264,12 @@ impl CocoonClient {
     /// Returns the same errors as `connect`.
     pub fn connect_verbose(config: &RuntimeConfig) -> Result<Self> {
         Self::connect_with_verbosity(config, ConnectVerbosity::Verbose)
+    }
+
+    /// Connected client contract address returned by `client.connectToProxy`.
+    #[must_use]
+    pub fn client_contract_address(&self) -> &str {
+        &self.client_sc_address
     }
 
     /// Opens and authorizes a full Cocoon proxy connection for CLI use.
@@ -1718,9 +1748,14 @@ fn connect_to_proxy(
 ) -> Result<ConnectedProxyInfo> {
     let request =
         cocoon::encode_connect_to_proxy(&config.cocoon_wallet_address, config.min_config_version);
-    let response = session
-        .make_request(&request)
-        .context("client.connectToProxy")?;
+    let response = match session.make_request(&request) {
+        Ok(response) => response,
+        Err(error) if proxy_query_error_is_client_closing(&error) => {
+            return Err(anyhow::Error::new(ClientContractClosedOrClosing))
+                .context("client.connectToProxy");
+        }
+        Err(error) => return Err(error).context("client.connectToProxy"),
+    };
     let connected_to_proxy = cocoon::decode_connected_to_proxy(&response)?;
     let auth = match connected_to_proxy.auth {
         cocoon::ProxyConnectionAuth::Short { secret_hash, nonce } => ProxyAuthInfo::Short {
@@ -1740,6 +1775,18 @@ fn connect_to_proxy(
         proxy_public_key: *connected_to_proxy.params.proxy_public_key,
         auth,
     })
+}
+
+fn proxy_query_error_is_client_closing(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<QueryError>())
+        .is_some_and(|error| {
+            error.code() == PROXY_CLIENT_CLOSING_QUERY_ERROR_CODE
+                && error
+                    .message()
+                    .contains(PROXY_CLIENT_CLOSING_QUERY_ERROR_MESSAGE)
+        })
 }
 
 /// Performs Cocoon proxy authorization and returns the negotiated protocol version.
@@ -2345,6 +2392,21 @@ mod tests {
             wallet_address: String::new(),
             external_message: vec![1, 2, 3],
         }
+    }
+
+    #[test]
+    fn proxy_client_closing_query_error_is_actionable() {
+        let error = anyhow::Error::new(QueryError::new(602, "client is closing"));
+
+        assert!(proxy_query_error_is_client_closing(&error));
+    }
+
+    #[test]
+    fn client_contract_closed_error_is_detected_through_context() {
+        let error =
+            anyhow::Error::new(ClientContractClosedOrClosing).context("client.connectToProxy");
+
+        assert!(is_client_contract_closed_or_closing_error(&error));
     }
 
     #[test]

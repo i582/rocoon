@@ -1,11 +1,21 @@
+use std::error::Error;
+use std::fmt;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::process;
 
 use anyhow::{Context, Result};
-use clap::{CommandFactory, Parser, Subcommand};
-use rocoon_client::{COCOON_WALLET_RESERVE_NANOTONS, CocoonClient, RuntimeConfig};
+use clap::{ColorChoice, CommandFactory, Parser, Subcommand};
+use rocoon_client::{
+    COCOON_WALLET_RESERVE_NANOTONS, CocoonClient, RuntimeConfig,
+    is_client_contract_closed_or_closing_error,
+};
 use rocoon_openai_server::{Defaults, serve};
+
+mod color;
+
+use color::{ColorMode, OwoColorize, init_color_mode};
 
 const NANOTONS_PER_TON: u64 = 1_000_000_000;
 const STATE_FILE_NAME: &str = ".rocoon-state";
@@ -14,7 +24,8 @@ const STATE_FILE_NAME: &str = ".rocoon-state";
 #[command(
     name = "rocoon",
     version,
-    about = "Rust bridge for the Cocoon proxy protocol"
+    about = "Rust bridge for the Cocoon proxy protocol",
+    color = ColorChoice::Auto
 )]
 struct Cli {
     #[arg(short, long, value_name = "PATH", global = true)]
@@ -22,6 +33,16 @@ struct Cli {
 
     #[arg(short, long, global = true)]
     verbose: bool,
+
+    #[arg(
+        long,
+        value_enum,
+        global = true,
+        value_name = "WHEN",
+        default_value_t = ColorMode::Auto,
+        help = "Control when to use colored output"
+    )]
+    color: ColorMode,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -65,15 +86,29 @@ enum Command {
     },
 }
 
-fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let Some(command) = cli.command else {
+fn main() {
+    if let Err(error) = run() {
+        print_cli_error(&error);
+        process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
+    let Cli {
+        config,
+        verbose,
+        color,
+        command,
+    } = Cli::parse();
+    init_color_mode(color);
+
+    let Some(command) = command else {
         Cli::command().print_help()?;
         println!();
         return Ok(());
     };
 
-    let config = RuntimeConfig::load_cli(cli.config, cli.verbose)?;
+    let config = RuntimeConfig::load_cli(config, verbose)?;
     if config.verbose {
         println!("config: {}", config.config_path.display());
     }
@@ -100,8 +135,66 @@ fn main() -> Result<()> {
     }
 }
 
+fn print_cli_error(error: &anyhow::Error) {
+    if let Some(error) = error.downcast_ref::<ClosedClientContractStartError>() {
+        print_closed_client_contract_error(error);
+        return;
+    }
+
+    eprintln!("{} {error:#}", "error:".red().bold());
+}
+
+fn print_closed_client_contract_error(error: &ClosedClientContractStartError) {
+    eprintln!(
+        "{} Cocoon client contract is closing or closed",
+        "error:".red().bold()
+    );
+    eprintln!(
+        "The configured {} points to a contract that the {} will not reopen.",
+        "client.node_wallet_key".cyan().bold(),
+        "proxy".cyan().bold()
+    );
+    eprintln!();
+    if let Some(address) = &error.client_contract_address {
+        eprintln!("{} {address}", "client contract:".cyan().bold());
+    }
+    eprintln!(
+        "{}   {}",
+        "cocoon wallet:".cyan().bold(),
+        error.cocoon_wallet_address
+    );
+    eprintln!(
+        "{}      {}",
+        "state file:".cyan().bold(),
+        error.state_file_path.display()
+    );
+    eprintln!();
+    eprintln!(
+        "Generate a new 32-byte {} and update {} or {}.",
+        "client.node_wallet_key".cyan().bold(),
+        "rocoon.toml".cyan().bold(),
+        "COCOON_NODE_WALLET_KEY".cyan().bold()
+    );
+    eprintln!(
+        "To sweep old funds first, keep the old key configured and run: {}",
+        "rocoon withdraw".cyan().bold()
+    );
+}
+
 fn serve_http(config: &RuntimeConfig) -> Result<()> {
-    let client = CocoonClient::connect_interactive(config)?;
+    fail_if_cached_client_contract_is_closed(config)?;
+    let client = match CocoonClient::connect_interactive(config) {
+        Ok(client) => client,
+        Err(error) if is_client_contract_closed_or_closing_error(&error) => {
+            return Err(closed_client_contract_start_error(config));
+        }
+        Err(error) => return Err(error),
+    };
+    remember_client_contract(
+        config,
+        client.client_contract_address(),
+        ClientContractStatus::Active,
+    );
     let defaults = Defaults {
         max_coefficient: config.max_coefficient,
         max_tokens: config.max_tokens,
@@ -112,7 +205,11 @@ fn serve_http(config: &RuntimeConfig) -> Result<()> {
 
 fn request_withdraw(config: &RuntimeConfig, client_contract: Option<&str>) -> Result<()> {
     let result = CocoonClient::request_withdraw_interactive(config, client_contract)?;
-    remember_client_contract(config, &result.client_contract_address);
+    remember_client_contract(
+        config,
+        &result.client_contract_address,
+        ClientContractStatus::Active,
+    );
     println!("✓ Withdraw request sent");
     println!("Client contract: {}", result.client_contract_address);
     println!("Wallet seqno: {}", result.wallet_seqno);
@@ -126,7 +223,11 @@ fn request_withdraw(config: &RuntimeConfig, client_contract: Option<&str>) -> Re
 
 fn request_close(config: &RuntimeConfig, client_contract: Option<&str>) -> Result<()> {
     let result = CocoonClient::request_close_interactive(config, client_contract)?;
-    remember_client_contract(config, &result.client_contract_address);
+    remember_client_contract(
+        config,
+        &result.client_contract_address,
+        ClientContractStatus::CloseRequested,
+    );
     println!("✓ Close request sent");
     println!("Client contract: {}", result.client_contract_address);
     println!("Wallet seqno: {}", result.wallet_seqno);
@@ -150,6 +251,9 @@ fn sweep_wallet(
         destination_address,
         reserve_nanotons,
     )?;
+    if let Some(client_contract) = client_contract {
+        remember_client_contract(config, client_contract, ClientContractStatus::Closed);
+    }
     println!("✓ Wallet withdraw sent");
     println!("Wallet: {}", result.wallet_address);
     println!("Destination: {}", result.destination_address);
@@ -177,15 +281,72 @@ struct CliState {
     cocoon_wallet_address: String,
     proxy_addr: String,
     client_contract_address: String,
+    client_contract_status: ClientContractStatus,
+}
+
+#[derive(Debug)]
+struct ClosedClientContractStartError {
+    cocoon_wallet_address: String,
+    client_contract_address: Option<String>,
+    state_file_path: PathBuf,
+}
+
+impl ClosedClientContractStartError {
+    fn new(config: &RuntimeConfig, state: Option<&CliState>) -> Self {
+        Self {
+            cocoon_wallet_address: config.cocoon_wallet_address.clone(),
+            client_contract_address: state.map(|state| state.client_contract_address.clone()),
+            state_file_path: state_file_path(config),
+        }
+    }
+}
+
+impl fmt::Display for ClosedClientContractStartError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Cocoon client contract is closing or closed")
+    }
+}
+
+impl Error for ClosedClientContractStartError {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClientContractStatus {
+    Active,
+    CloseRequested,
+    Closed,
+}
+
+impl ClientContractStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::CloseRequested => "close_requested",
+            Self::Closed => "closed",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "active" => Some(Self::Active),
+            "close_requested" => Some(Self::CloseRequested),
+            "closed" => Some(Self::Closed),
+            _ => None,
+        }
+    }
 }
 
 impl CliState {
-    fn new(config: &RuntimeConfig, client_contract_address: &str) -> Self {
+    fn new(
+        config: &RuntimeConfig,
+        client_contract_address: &str,
+        client_contract_status: ClientContractStatus,
+    ) -> Self {
         Self {
             owner_address: config.owner_address.clone(),
             cocoon_wallet_address: config.cocoon_wallet_address.clone(),
             proxy_addr: config.proxy_addr.clone(),
             client_contract_address: client_contract_address.to_string(),
+            client_contract_status,
         }
     }
 
@@ -197,11 +358,12 @@ impl CliState {
 
     fn render(&self) -> String {
         format!(
-            "version=1\nowner_address={}\ncocoon_wallet_address={}\nproxy_addr={}\nclient_contract_address={}\n",
+            "version=1\nowner_address={}\ncocoon_wallet_address={}\nproxy_addr={}\nclient_contract_address={}\nclient_contract_status={}\n",
             self.owner_address,
             self.cocoon_wallet_address,
             self.proxy_addr,
-            self.client_contract_address
+            self.client_contract_address,
+            self.client_contract_status.as_str()
         )
     }
 
@@ -211,6 +373,7 @@ impl CliState {
         let mut cocoon_wallet_address = None;
         let mut proxy_addr = None;
         let mut client_contract_address = None;
+        let mut client_contract_status = None;
 
         for line in data.lines().map(str::trim) {
             let Some((key, value)) = line.split_once('=') else {
@@ -222,6 +385,9 @@ impl CliState {
                 "cocoon_wallet_address" => cocoon_wallet_address = Some(value.to_string()),
                 "proxy_addr" => proxy_addr = Some(value.to_string()),
                 "client_contract_address" => client_contract_address = Some(value.to_string()),
+                "client_contract_status" => {
+                    client_contract_status = ClientContractStatus::parse(value);
+                }
                 _ => {}
             }
         }
@@ -241,12 +407,17 @@ impl CliState {
                 client_contract_address,
                 "client_contract_address",
             )?,
+            client_contract_status: client_contract_status.unwrap_or(ClientContractStatus::Active),
         })
     }
 }
 
-fn remember_client_contract(config: &RuntimeConfig, client_contract_address: &str) {
-    let state = CliState::new(config, client_contract_address);
+fn remember_client_contract(
+    config: &RuntimeConfig,
+    client_contract_address: &str,
+    client_contract_status: ClientContractStatus,
+) {
+    let state = CliState::new(config, client_contract_address, client_contract_status);
     let path = state_file_path(config);
     match fs::write(&path, state.render()) {
         Ok(()) if config.verbose => {
@@ -260,30 +431,61 @@ fn remember_client_contract(config: &RuntimeConfig, client_contract_address: &st
 }
 
 fn cached_client_contract(config: &RuntimeConfig) -> Option<String> {
+    let state = read_matching_state(config, true)?;
+    println!(
+        "> Using cached client contract {}",
+        state.client_contract_address
+    );
+    Some(state.client_contract_address)
+}
+
+fn read_matching_state(config: &RuntimeConfig, warn: bool) -> Option<CliState> {
     let path = state_file_path(config);
     let data = match fs::read_to_string(&path) {
         Ok(data) => data,
         Err(error) if error.kind() == ErrorKind::NotFound => return None,
         Err(error) => {
-            eprintln!("warning: failed to read {}: {error}", path.display());
+            if warn {
+                eprintln!("warning: failed to read {}: {error}", path.display());
+            }
             return None;
         }
     };
     let state = match CliState::parse(&data) {
         Ok(state) => state,
         Err(error) => {
-            eprintln!("warning: ignoring invalid {}: {error:#}", path.display());
+            if warn {
+                eprintln!("warning: ignoring invalid {}: {error:#}", path.display());
+            }
             return None;
         }
     };
     if !state.matches_config(config) {
         return None;
     }
-    println!(
-        "> Using cached client contract {}",
-        state.client_contract_address
-    );
-    Some(state.client_contract_address)
+    Some(state)
+}
+
+fn fail_if_cached_client_contract_is_closed(config: &RuntimeConfig) -> Result<()> {
+    let Some(state) = read_matching_state(config, false) else {
+        return Ok(());
+    };
+    if state.client_contract_status != ClientContractStatus::Closed {
+        return Ok(());
+    }
+    Err(ClosedClientContractStartError::new(config, Some(&state)).into())
+}
+
+fn closed_client_contract_start_error(config: &RuntimeConfig) -> anyhow::Error {
+    let state = read_matching_state(config, false);
+    if let Some(state) = &state {
+        remember_client_contract(
+            config,
+            &state.client_contract_address,
+            ClientContractStatus::Closed,
+        );
+    }
+    ClosedClientContractStartError::new(config, state.as_ref()).into()
 }
 
 fn state_file_path(config: &RuntimeConfig) -> PathBuf {
@@ -299,4 +501,30 @@ fn config_dir(config_path: &Path) -> &Path {
 
 fn required_state_field(value: Option<String>, name: &str) -> Result<String> {
     value.with_context(|| format!("missing {name} in rocoon state"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_state_parse_defaults_old_cache_to_active() -> Result<()> {
+        let state = CliState::parse(
+            "version=1\nowner_address=owner\ncocoon_wallet_address=wallet\nproxy_addr=proxy\nclient_contract_address=contract\n",
+        )?;
+
+        assert_eq!(state.client_contract_status, ClientContractStatus::Active);
+        Ok(())
+    }
+
+    #[test]
+    fn cli_state_round_trips_client_contract_status() -> Result<()> {
+        let state = CliState::parse(
+            "version=1\nowner_address=owner\ncocoon_wallet_address=wallet\nproxy_addr=proxy\nclient_contract_address=contract\nclient_contract_status=closed\n",
+        )?;
+
+        assert_eq!(state.client_contract_status, ClientContractStatus::Closed);
+        assert!(state.render().contains("client_contract_status=closed\n"));
+        Ok(())
+    }
 }
