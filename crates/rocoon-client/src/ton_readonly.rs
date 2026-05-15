@@ -14,8 +14,8 @@ use anyhow::{Context, Result};
 use ed25519_dalek::{Signer, SigningKey};
 use rand::RngCore;
 use rocoon_contract::{
-    CocoonClientContractData, CocoonClientControlAction, CocoonClientControlBody, CocoonWalletData,
-    CocoonWalletUnsignedBody, cocoon_wallet_signed_body,
+    CocoonClientContractData, CocoonClientControlAction, CocoonClientControlBody,
+    CocoonRootStorage, CocoonWalletData, CocoonWalletUnsignedBody, cocoon_wallet_signed_body,
 };
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 use ton::block_tlb::{
@@ -68,6 +68,8 @@ pub struct TonReadonlySnapshot {
     pub wallet: Option<TonWalletSnapshot>,
     /// Client contract account state for the connected proxy.
     pub client_contract: Option<ClientContractSnapshot>,
+    /// Root contract account state, including the registered proxy list.
+    pub root_contract: Option<RootContractSnapshot>,
 }
 
 /// Parsed Cocoon wallet account snapshot.
@@ -108,6 +110,34 @@ pub struct ClientContractSnapshot {
     pub secret_hash: Option<[u8; 32]>,
     /// Balance above stake that can be withdrawn.
     pub withdrawable_balance: Option<u64>,
+}
+
+/// Parsed Cocoon root contract account snapshot.
+#[derive(Clone, Debug)]
+pub struct RootContractSnapshot {
+    /// TON account state for the root contract.
+    pub account_state: TonAccountState,
+    /// Last transaction logical time for the root contract account.
+    pub last_tx_lt: Option<u64>,
+    /// Root contract storage version.
+    pub version: Option<u32>,
+    /// Last proxy seqno stored in root data.
+    pub last_proxy_seqno: Option<u32>,
+    /// Registered Cocoon proxy network addresses.
+    pub registered_proxies: Vec<RegisteredProxySnapshot>,
+}
+
+/// One registered proxy entry from the root contract dictionary.
+#[derive(Clone, Debug)]
+pub struct RegisteredProxySnapshot {
+    /// Proxy registration seqno.
+    pub seqno: u32,
+    /// Raw address string stored in the root contract.
+    pub address: String,
+    /// Address used by workers when connecting to this proxy.
+    pub address_for_workers: String,
+    /// Address used by clients when connecting to this proxy.
+    pub address_for_clients: String,
 }
 
 /// Control action sent through the Cocoon wallet to the client contract.
@@ -448,6 +478,7 @@ impl TonReadonlyClient {
         &self,
         wallet_address: &str,
         client_contract_address: Option<&str>,
+        root_contract_address: Option<&str>,
     ) -> Result<TonReadonlySnapshot> {
         let wallet_address =
             TonAddress::from_str(wallet_address).context("parse Cocoon wallet address")?;
@@ -455,9 +486,31 @@ impl TonReadonlyClient {
             .map(TonAddress::from_str)
             .transpose()
             .context("parse Cocoon client contract address")?;
-        self.runtime.block_on(
-            self.fetch_accounts_snapshot(&wallet_address, client_contract_address.as_ref()),
-        )
+        let root_contract_address = root_contract_address
+            .map(TonAddress::from_str)
+            .transpose()
+            .context("parse Cocoon root contract address")?;
+        self.runtime.block_on(self.fetch_accounts_snapshot(
+            &wallet_address,
+            client_contract_address.as_ref(),
+            root_contract_address.as_ref(),
+        ))
+    }
+
+    /// Fetches the Cocoon root contract state and registered proxy list.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the root contract address is invalid, liteserver
+    /// queries fail, or the contract data cell cannot be parsed.
+    pub fn root_contract_snapshot(
+        &self,
+        root_contract_address: &str,
+    ) -> Result<RootContractSnapshot> {
+        let root_contract_address = TonAddress::from_str(root_contract_address)
+            .context("parse Cocoon root contract address")?;
+        self.runtime
+            .block_on(self.fetch_root_contract_snapshot(&root_contract_address))
     }
 
     /// Builds and signs one owner control message without sending it.
@@ -887,6 +940,7 @@ impl TonReadonlyClient {
         &self,
         wallet_address: &TonAddress,
         client_contract_address: Option<&TonAddress>,
+        root_contract_address: Option<&TonAddress>,
     ) -> Result<TonReadonlySnapshot> {
         let masterchain = self
             .client
@@ -911,13 +965,52 @@ impl TonReadonlyClient {
         } else {
             None
         };
+        let root_contract = if let Some(root_contract_address) = root_contract_address {
+            Some(
+                self.fetch_root_contract_snapshot_at(root_contract_address, masterchain.last.seqno)
+                    .await?,
+            )
+        } else {
+            None
+        };
         Ok(TonReadonlySnapshot {
             ok: true,
             last_error: None,
             masterchain_seqno: Some(masterchain.last.seqno),
             wallet: Some(wallet),
             client_contract,
+            root_contract,
         })
+    }
+
+    async fn fetch_root_contract_snapshot(
+        &self,
+        root_contract_address: &TonAddress,
+    ) -> Result<RootContractSnapshot> {
+        let masterchain = self
+            .client
+            .get_mc_info()
+            .await
+            .context("get TON masterchain info")?;
+        self.fetch_root_contract_snapshot_at(root_contract_address, masterchain.last.seqno)
+            .await
+    }
+
+    async fn fetch_root_contract_snapshot_at(
+        &self,
+        root_contract_address: &TonAddress,
+        masterchain_seqno: u32,
+    ) -> Result<RootContractSnapshot> {
+        let account = self
+            .client
+            .get_account_state(
+                root_contract_address,
+                masterchain_seqno,
+                Some(self.req_params),
+            )
+            .await
+            .context("get Cocoon root contract account state")?;
+        RootContractSnapshot::from_account(&account).context("parse Cocoon root contract account")
     }
 
     async fn fetch_client_register_context(
@@ -979,6 +1072,7 @@ impl TonReadonlySnapshot {
             masterchain_seqno: None,
             wallet: None,
             client_contract: None,
+            root_contract: None,
         }
     }
 }
@@ -1045,6 +1139,20 @@ impl CocoonRootConfig {
             .get_data()
             .context("Cocoon root contract data cell is unavailable")?;
         parse_root_config_from_data(data)
+    }
+}
+
+impl RootContractSnapshot {
+    fn from_account(account: &MaybeAccount) -> Result<Self> {
+        let state = account_state(account);
+        let data = read_root_contract_storage(account.get_data())?;
+        Ok(Self {
+            account_state: state,
+            last_tx_lt: last_tx_lt(account),
+            version: data.as_ref().map(|storage| storage.version),
+            last_proxy_seqno: data.as_ref().map(|storage| storage.data.last_proxy_seqno),
+            registered_proxies: data.map_or_else(Vec::new, registered_proxy_snapshots),
+        })
     }
 }
 
@@ -1402,6 +1510,43 @@ fn validate_cocoon_wallet_can_send_value(
         );
     }
     Ok(wallet_seqno)
+}
+
+fn read_root_contract_storage(data: Option<&TonCell>) -> Result<Option<CocoonRootStorage>> {
+    let Some(data) = data else {
+        return Ok(None);
+    };
+    CocoonRootStorage::from_cell(data)
+        .map(Some)
+        .context("read Cocoon root storage")
+}
+
+fn registered_proxy_snapshots(storage: CocoonRootStorage) -> Vec<RegisteredProxySnapshot> {
+    let data = storage.data.into_inner();
+    let mut registered_proxies = data
+        .registered_proxies
+        .into_iter()
+        .map(|(seqno, value)| registered_proxy_snapshot(seqno, value.address))
+        .collect::<Vec<_>>();
+    registered_proxies.sort_by_key(|proxy| proxy.seqno);
+    registered_proxies
+}
+
+fn registered_proxy_snapshot(seqno: u32, address: String) -> RegisteredProxySnapshot {
+    let normalized_address = address.trim();
+    let (address_for_workers, address_for_clients) =
+        if let Some((workers, clients)) = normalized_address.split_once(' ') {
+            (workers.trim().to_string(), clients.trim().to_string())
+        } else {
+            let address = normalized_address.to_string();
+            (address.clone(), address)
+        };
+    RegisteredProxySnapshot {
+        seqno,
+        address,
+        address_for_workers,
+        address_for_clients,
+    }
 }
 
 const fn client_contract_state_name(state: u8) -> &'static str {

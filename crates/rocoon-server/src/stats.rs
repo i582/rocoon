@@ -143,6 +143,7 @@ impl ServerStats {
                 network: "ton",
                 masterchain_seqno: client.masterchain_seqno,
             },
+            root_contract: root_contract_response(client),
             client_contract: client_contract_response(client),
             wallet: WalletResponse {
                 address: client.cocoon_wallet_address.clone(),
@@ -190,6 +191,7 @@ pub struct StatsResponse {
     status: StatusResponse,
     client: ClientResponse,
     blockchain: BlockchainResponse,
+    root_contract: Option<RootContractResponse>,
     client_contract: Option<ClientContractResponse>,
     wallet: WalletResponse,
     payment: PaymentResponse,
@@ -222,6 +224,25 @@ struct ClientResponse {
 struct BlockchainResponse {
     network: &'static str,
     masterchain_seqno: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct RootContractResponse {
+    address: Option<String>,
+    account_state: &'static str,
+    last_tx_lt: Option<u64>,
+    version: Option<u32>,
+    last_proxy_seqno: Option<u32>,
+    registered_proxies_count: usize,
+    registered_proxies: Vec<RegisteredProxyResponse>,
+}
+
+#[derive(Serialize)]
+struct RegisteredProxyResponse {
+    seqno: u32,
+    address: String,
+    address_for_workers: String,
+    address_for_clients: String,
 }
 
 #[derive(Serialize)]
@@ -517,6 +538,28 @@ fn format_nanotons_u64_as_ton(value: u64) -> String {
     let whole = value / NANOTONS_PER_TON;
     let frac = value % NANOTONS_PER_TON;
     format!("{whole}.{frac:09}")
+}
+
+fn root_contract_response(client: &ClientStatus) -> Option<RootContractResponse> {
+    let contract = client.root_contract.as_ref()?;
+    Some(RootContractResponse {
+        address: client.root_contract_address.clone(),
+        account_state: contract.account_state.as_str(),
+        last_tx_lt: contract.last_tx_lt,
+        version: contract.version,
+        last_proxy_seqno: contract.last_proxy_seqno,
+        registered_proxies_count: contract.registered_proxies.len(),
+        registered_proxies: contract
+            .registered_proxies
+            .iter()
+            .map(|proxy| RegisteredProxyResponse {
+                seqno: proxy.seqno,
+                address: proxy.address.clone(),
+                address_for_workers: proxy.address_for_workers.clone(),
+                address_for_clients: proxy.address_for_clients.clone(),
+            })
+            .collect(),
+    })
 }
 
 fn client_contract_response(client: &ClientStatus) -> Option<ClientContractResponse> {

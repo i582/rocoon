@@ -75,7 +75,7 @@ pub struct TonRuntimeConfig {
     pub mainnet: bool,
     /// Optional TON global config JSON path overriding the embedded/default config.
     pub config_path: Option<PathBuf>,
-    /// Optional root contract address shown in diagnostics and used by future root polling.
+    /// Optional root contract address used to read registered proxies for diagnostics.
     pub root_contract_address: Option<String>,
     /// Per-query timeout passed to `ton-rs` liteclient requests.
     pub query_timeout_millis: u64,

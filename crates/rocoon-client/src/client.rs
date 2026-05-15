@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 
 use crate::ton_readonly::{
     COCOON_WALLET_MIN_BALANCE_NANOTONS, COCOON_WALLET_RESERVE_NANOTONS,
-    CONTROL_MESSAGE_VALUE_NANOTONS, ClientContractSnapshot, TonAccountState,
+    CONTROL_MESSAGE_VALUE_NANOTONS, ClientContractSnapshot, RootContractSnapshot, TonAccountState,
     TonClientRegisterPreparedMessage, TonClientRegisterRequest, TonClientRegisterResult,
     TonClientSecretHashPreparedMessage, TonClientSecretHashRequest, TonClientSecretHashResult,
     TonClientTopUpPreparedMessage, TonClientTopUpRequest, TonClientTopUpResult, TonControlAction,
@@ -153,6 +153,8 @@ pub struct ClientStatus {
     pub client_top_up_running: bool,
     /// Connected client contract account and data-cell state.
     pub client_contract: Option<ClientContractSnapshot>,
+    /// Root contract state and registered proxies, when configured.
+    pub root_contract: Option<RootContractSnapshot>,
 }
 
 /// Payment counters returned by `client.authorizeWithProxyShort`.
@@ -182,6 +184,18 @@ pub struct WorkerInfo {
     pub active_requests: i32,
     /// Worker-side concurrency limit.
     pub max_active_requests: i32,
+}
+
+/// Metadata returned by a lightweight `client.connectToProxy` probe.
+pub struct ProxyHandshakeInfo {
+    /// TCP address used for the probe.
+    pub proxy_addr: String,
+    /// Protocol version negotiated with the proxy.
+    pub proto_version: i32,
+    /// Proxy owner address returned by `client.connectedToProxy`.
+    pub proxy_owner_address: String,
+    /// Proxy smart-contract address returned by `client.connectedToProxy`.
+    pub proxy_sc_address: String,
 }
 
 /// HTTP response returned by Cocoon after an inference request.
@@ -357,6 +371,47 @@ impl CocoonClient {
         )
     }
 
+    /// Reads the Cocoon root contract and returns the registered proxy list.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no root contract address is configured, TON
+    /// liteclient initialization fails, or the root contract data cannot be read.
+    pub fn root_contract_snapshot(
+        config: &RuntimeConfig,
+        root_contract_address: Option<&str>,
+    ) -> Result<RootContractSnapshot> {
+        let root_contract_address = root_contract_address
+            .or(config.ton.root_contract_address.as_deref())
+            .context(
+                "ton.root_contract_address is required; pass --root-contract or set [ton].root_contract_address",
+            )?;
+        let client = TonReadonlyClient::connect(&config.ton)
+            .context("connect TON liteclient for Cocoon root contract")?;
+        client.root_contract_snapshot(root_contract_address)
+    }
+
+    /// Performs a lightweight proxy handshake and returns public proxy metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the proxy TCP/RA-TLS/session handshake fails or
+    /// `client.connectToProxy` does not return a valid response.
+    pub fn proxy_handshake_info(
+        config: &RuntimeConfig,
+        proxy_addr: &str,
+    ) -> Result<ProxyHandshakeInfo> {
+        let mut config = config.clone();
+        config.proxy_addr = proxy_addr.to_string();
+        let info = discover_proxy_info(&config, config.verbose)?;
+        Ok(ProxyHandshakeInfo {
+            proxy_addr: config.proxy_addr,
+            proto_version: info.proto_version,
+            proxy_owner_address: info.proxy_owner_address,
+            proxy_sc_address: info.proxy_sc_address,
+        })
+    }
+
     fn connect_with_verbosity(config: &RuntimeConfig, verbosity: ConnectVerbosity) -> Result<Self> {
         let mut session = open_session(config, verbosity.is_verbose())?;
         let mut ton_readonly = TonReadonlyState::new(config);
@@ -416,9 +471,11 @@ impl CocoonClient {
 
     /// Returns the locally known connection, wallet, and payment status.
     pub fn status(&mut self) -> ClientStatus {
-        let ton = self
-            .ton_readonly
-            .snapshot(&self.config.cocoon_wallet_address, &self.client_sc_address);
+        let ton = self.ton_readonly.snapshot(
+            &self.config.cocoon_wallet_address,
+            &self.client_sc_address,
+            self.config.ton.root_contract_address.as_deref(),
+        );
         if let Some(client_contract) = &ton.client_contract {
             self.refresh_client_top_up_request(client_contract);
         }
@@ -444,6 +501,7 @@ impl CocoonClient {
             wallet_last_tx_lt: wallet.and_then(|wallet| wallet.last_tx_lt),
             client_top_up_running: self.client_top_up_request.is_some(),
             client_contract: ton.client_contract,
+            root_contract: ton.root_contract,
         }
     }
 
@@ -538,9 +596,11 @@ impl CocoonClient {
     }
 
     fn update_balances_and_check(&mut self) -> Result<()> {
-        let ton = self
-            .ton_readonly
-            .snapshot(&self.config.cocoon_wallet_address, &self.client_sc_address);
+        let ton = self.ton_readonly.snapshot(
+            &self.config.cocoon_wallet_address,
+            &self.client_sc_address,
+            None,
+        );
         if !ton.ok {
             anyhow::bail!(
                 "TON state is unavailable: {}",
@@ -724,6 +784,7 @@ impl TonReadonlyState {
         &mut self,
         wallet_address: &str,
         client_contract_address: &str,
+        root_contract_address: Option<&str>,
     ) -> TonReadonlySnapshot {
         match self {
             Self::Failed { config, error } => {
@@ -731,7 +792,11 @@ impl TonReadonlyState {
                 match TonReadonlyClient::connect(&config) {
                     Ok(client) => {
                         *self = Self::Ready { config, client };
-                        self.snapshot(wallet_address, client_contract_address)
+                        self.snapshot(
+                            wallet_address,
+                            client_contract_address,
+                            root_contract_address,
+                        )
                     }
                     Err(reconnect_error) => TonReadonlySnapshot::failed(format!(
                         "{error}; reconnect failed: {reconnect_error:#}"
@@ -739,23 +804,34 @@ impl TonReadonlyState {
                 }
             }
             Self::Ready { config, client } => {
-                match client.accounts_snapshot(wallet_address, Some(client_contract_address)) {
+                match client.accounts_snapshot(
+                    wallet_address,
+                    Some(client_contract_address),
+                    root_contract_address,
+                ) {
                     Ok(snapshot) => snapshot,
-                    Err(first_error) => match TonReadonlyClient::connect(config) {
-                        Ok(replacement) => {
-                            *client = replacement;
-                            client
-                                    .accounts_snapshot(wallet_address, Some(client_contract_address))
+                    Err(first_error) => {
+                        eprintln!("TON snapshot failed, reconnecting liteclient: {first_error:#}");
+                        match TonReadonlyClient::connect(config) {
+                            Ok(replacement) => {
+                                *client = replacement;
+                                client
+                                    .accounts_snapshot(
+                                        wallet_address,
+                                        Some(client_contract_address),
+                                        root_contract_address,
+                                    )
                                     .unwrap_or_else(|second_error| {
                                         TonReadonlySnapshot::failed(format!(
                                             "{first_error:#}; retry after reconnect failed: {second_error:#}"
                                         ))
                                     })
+                            }
+                            Err(reconnect_error) => TonReadonlySnapshot::failed(format!(
+                                "{first_error:#}; reconnect failed: {reconnect_error:#}"
+                            )),
                         }
-                        Err(reconnect_error) => TonReadonlySnapshot::failed(format!(
-                            "{first_error:#}; reconnect failed: {reconnect_error:#}"
-                        )),
-                    },
+                    }
                 }
             }
         }
@@ -1459,7 +1535,7 @@ fn send_client_control_from_config(
     action: TonControlAction,
 ) -> Result<TonControlResult> {
     let mut ton_readonly = TonReadonlyState::new(config);
-    let ton = ton_readonly.snapshot(&config.cocoon_wallet_address, client_sc_address);
+    let ton = ton_readonly.snapshot(&config.cocoon_wallet_address, client_sc_address, None);
     if !ton.ok {
         anyhow::bail!(
             "TON state is unavailable: {}",
@@ -1496,7 +1572,7 @@ fn sweep_cocoon_wallet_from_config(
     reserve_nanotons: u64,
 ) -> Result<TonWalletTransferResult> {
     let mut ton_readonly = TonReadonlyState::new(config);
-    let ton = ton_readonly.snapshot(&config.cocoon_wallet_address, client_sc_address);
+    let ton = ton_readonly.snapshot(&config.cocoon_wallet_address, client_sc_address, None);
     if !ton.ok {
         anyhow::bail!(
             "TON state is unavailable: {}",
@@ -1542,7 +1618,8 @@ fn ensure_short_auth_secret_hash(
     let mut sent_update = false;
 
     for attempt in 1..=SECRET_HASH_CONFIRM_ATTEMPTS {
-        let snapshot = ton_readonly.snapshot(&config.cocoon_wallet_address, client_sc_address);
+        let snapshot =
+            ton_readonly.snapshot(&config.cocoon_wallet_address, client_sc_address, None);
         if !snapshot.ok {
             if attempt == SECRET_HASH_CONFIRM_ATTEMPTS {
                 anyhow::bail!(
@@ -1656,7 +1733,7 @@ fn read_interactive_wallet_balance(config: &RuntimeConfig) -> Result<u64> {
     let client = TonReadonlyClient::connect(&config.ton)
         .context("connect TON liteclient to check Cocoon wallet balance")?;
     let snapshot = client
-        .accounts_snapshot(&config.cocoon_wallet_address, None)
+        .accounts_snapshot(&config.cocoon_wallet_address, None, None)
         .context("read Cocoon wallet balance")?;
     snapshot
         .wallet

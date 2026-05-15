@@ -97,6 +97,12 @@ enum Command {
         )]
         reserve_nanotons: u64,
     },
+    /// Print registered proxies from the Cocoon root contract.
+    Proxies {
+        /// Root contract address. Defaults to `[ton].root_contract_address`.
+        #[arg(long, value_name = "ADDRESS")]
+        root_contract: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -177,6 +183,9 @@ fn run() -> Result<()> {
                 to.as_deref(),
                 reserve_nanotons,
             )
+        }
+        Command::Proxies { root_contract } => {
+            commands::proxies::run(&config, root_contract.as_deref())
         }
     }
 }

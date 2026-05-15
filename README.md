@@ -18,7 +18,7 @@ Current scope:
 - Implement `/v1/chat/completions` and `/v1/completions` through `client.runQueryEx`.
 - Collect streamed Cocoon answer parts before returning the local HTTP response.
 - Expose local runtime statistics through `/stats`, `/jsonstats`, and `/v1/stats`.
-- Read Cocoon wallet/client-contract state from TON liteservers.
+- Read Cocoon wallet/client-contract state and root registered proxies from TON liteservers.
 - Send owner control transactions through the Cocoon wallet with CLI commands.
 - Sweep the closed Cocoon wallet balance back to the owner wallet with the CLI.
 
@@ -40,7 +40,7 @@ Workspace layout:
 
 Not implemented yet:
 
-- TON root contract stats polling.
+- Automatic proxy selection from the root contract proxy list.
 - RA-TLS/TEE quote verification.
 - True local HTTP streaming; streamed Cocoon chunks are aggregated before the local response is sent.
 
@@ -119,12 +119,16 @@ rocoon request-withdraw
 rocoon close
 rocoon withdraw --client-contract <client-contract-address>
 rocoon withdraw --to <destination-address> --reserve-nanotons 100000000
+rocoon proxies
+rocoon proxies --root-contract <cocoon-root-contract-address>
 ```
 
 `request-withdraw` sends `owner_client_withdraw` from the client contract to the
 Cocoon wallet. `close` sends `owner_client_request_refund`. `withdraw` or
 `sweep` sends the sweepable Cocoon wallet balance to `client.owner_address` or
-`--to`. If proxy discovery cannot resolve an already closed client contract,
+`--to`. `proxies` reads the Cocoon root contract, prints registered proxy
+addresses, and probes each proxy for its smart-contract address. If proxy
+discovery cannot resolve an already closed client contract,
 `rocoon` first tries the locally cached client contract from `.rocoon-state`;
 if there is no matching cache, pass the contract address with `--client-contract`.
 When the proxy reports that the cached client contract is closing or closed,
@@ -150,9 +154,13 @@ curl http://127.0.0.1:9999/v1/chat/completions \
 `/stats` returns locally observed request counters, token usage from Cocoon
 `final_info`, worker response `usage.total_cost`, proxy/debug strings from the
 last request, proxy connection metadata, and the derived Cocoon wallet address.
-It also returns TON wallet balance, seqno, account state, last transaction
-logical time, client-contract state, stake/balance/tokens fields, and
-masterchain seqno.
+It also returns TON wallet balance,
+seqno, account state, last transaction logical time, client-contract state,
+stake/balance/tokens fields, and masterchain seqno. If
+`[ton].root_contract_address` is set, it also reads the root contract version,
+`last_proxy_seqno`, and registered proxy addresses for diagnostics. The fetched
+proxy list does not change the active connection yet; `network.proxy_addr` is
+still used.
 
 When the proxy returns `auth: short`, `rocoon` uses `client.secret` or
 `COCOON_CLIENT_SECRET` to call `client.authorizeWithProxyShort`.
