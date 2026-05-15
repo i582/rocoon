@@ -2,9 +2,9 @@
 //!
 //! The Cocoon proxy speaks a TL-based protocol. Most message types in this
 //! file are thin Rust representations of those wire objects and are used only
-//! for serialization/deserialization. `tl-proto` handles most objects, but
-//! `client.runQueryEx` is encoded manually because this prototype needs exact
-//! compatibility with Cocoon's current double/flag layout.
+//! for serialization/deserialization. `tl-proto` handles the objects here, with
+//! a custom raw-double writer for `client.runQueryEx` because Cocoon's C++ peer
+//! expects IEEE-754 bits rather than `tl-proto`'s normalized `f64` writer.
 
 use anyhow::{Context, Result};
 use tl_proto::{TlRead, TlWrite};
@@ -29,10 +29,9 @@ pub struct RunQueryOptions {
 
 /// Parameters embedded into `client.connectToProxy`.
 #[derive(Debug, TlWrite)]
-#[allow(dead_code)]
 struct ClientParams<'a> {
     #[tl(flags)]
-    flags: (),
+    _flags: (),
     client_owner_address: &'a [u8],
     #[tl(flags_bit = 0)]
     is_test: Option<bool>,
@@ -82,10 +81,29 @@ struct HttpRequest<'a> {
     payload: &'a [u8],
 }
 
+/// TL request that runs an HTTP query on a Cocoon worker.
+#[derive(Debug, TlWrite)]
+#[tl(boxed, id = 0xf54c_b74b)]
+struct ClientRunQueryEx<'a> {
+    model: &'a [u8],
+    query: &'a [u8],
+    max_coefficient: i32,
+    max_tokens: i32,
+    #[tl(write_with = "write_raw_f64", size_hint = 8)]
+    timeout: f64,
+    request_id: &'a [u8; 32],
+    min_config_version: i32,
+    #[tl(flags)]
+    _flags: (),
+    #[tl(flags_bit = 0)]
+    encrypt: Option<bool>,
+    #[tl(flags_bit = 1)]
+    public_key: Option<&'a [u8; 32]>,
+}
+
 /// TL representation of an HTTP response returned by a Cocoon worker.
 #[derive(Debug, TlRead)]
 #[tl(boxed, id = 0x1cd0c42b)]
-#[allow(dead_code)]
 pub struct HttpResponse<'tl> {
     /// Worker-provided HTTP version string.
     pub http_version: &'tl [u8],
@@ -105,7 +123,6 @@ pub struct HttpResponse<'tl> {
 /// authorization mode the client must use next.
 #[derive(Debug, TlRead)]
 #[tl(boxed, id = 0x95317ad1)]
-#[allow(dead_code)]
 pub struct ConnectedToProxy<'tl> {
     pub params: ProxyParams<'tl>,
     pub client_sc_address: &'tl [u8],
@@ -115,10 +132,11 @@ pub struct ConnectedToProxy<'tl> {
 
 /// Proxy metadata returned during connection setup.
 #[derive(Debug, TlRead)]
-#[allow(dead_code, clippy::manual_non_exhaustive)]
+#[non_exhaustive]
 pub struct ProxyParams<'tl> {
     #[tl(flags)]
-    flags: (),
+    #[doc(hidden)]
+    pub flags: (),
     pub proxy_public_key: &'tl [u8; 32],
     pub proxy_owner_address: &'tl [u8],
     pub proxy_sc_address: &'tl [u8],
@@ -131,7 +149,6 @@ pub struct ProxyParams<'tl> {
 /// Authorization mode selected by the proxy.
 #[derive(Debug, TlRead)]
 #[tl(boxed)]
-#[allow(dead_code)]
 pub enum ProxyAuth<'tl> {
     /// Existing registered client can authorize with a shared secret.
     #[tl(id = 0xd6ffc5af)]
@@ -147,7 +164,6 @@ pub enum ProxyAuth<'tl> {
 /// Optional signed payment data returned by authorization.
 #[derive(Debug, TlRead)]
 #[tl(boxed)]
-#[allow(dead_code)]
 pub enum SignedPayment<'tl> {
     #[tl(id = 0x02998182)]
     Data { data: &'tl [u8] },
@@ -158,7 +174,6 @@ pub enum SignedPayment<'tl> {
 /// Result of `client.authorizeWithProxyShort`.
 #[derive(Debug, TlRead)]
 #[tl(boxed)]
-#[allow(dead_code)]
 pub enum AuthorizationWithProxy<'tl> {
     /// Authorization succeeded and the proxy returned current token limits.
     #[tl(id = 0x75d5ac34)]
@@ -191,10 +206,11 @@ pub struct WorkerTypeV2<'tl> {
 
 /// Worker capacity and price metadata returned by the proxy.
 #[derive(Debug, TlRead)]
-#[allow(dead_code, clippy::manual_non_exhaustive)]
+#[non_exhaustive]
 pub struct WorkerInstanceV2 {
     #[tl(flags)]
-    flags: (),
+    #[doc(hidden)]
+    pub flags: (),
     pub coefficient: i32,
     pub active_requests: i32,
     pub max_active_requests: i32,
@@ -205,10 +221,11 @@ pub struct WorkerInstanceV2 {
 /// The current HTTP bridge does not expose this object directly, but it is part
 /// of the TL schema and marks the end of a streamed Cocoon answer.
 #[derive(Debug, TlRead)]
-#[allow(dead_code, clippy::manual_non_exhaustive)]
+#[non_exhaustive]
 pub struct QueryFinalInfo<'tl> {
     #[tl(flags)]
-    flags: (),
+    #[doc(hidden)]
+    pub flags: (),
     pub tokens_used: TokensUsedTl,
     #[tl(flags_bit = 0)]
     pub worker_debug: Option<&'tl [u8]>,
@@ -226,7 +243,7 @@ pub struct QueryFinalInfo<'tl> {
 
 /// Token usage counters inside `QueryFinalInfo`.
 #[derive(Debug, Clone, Copy, TlRead)]
-#[allow(clippy::struct_field_names, dead_code)]
+#[allow(clippy::struct_field_names)]
 pub struct TokensUsedTl {
     pub prompt_tokens_used: i64,
     pub cached_tokens_used: i64,
@@ -238,7 +255,6 @@ pub struct TokensUsedTl {
 /// Streamed answer variants for `client.runQueryEx`.
 #[derive(Debug, TlRead)]
 #[tl(boxed)]
-#[allow(dead_code)]
 pub enum QueryAnswerEx<'tl> {
     /// First packet containing the encoded HTTP response head.
     #[tl(id = 0xcd524720)]
@@ -246,7 +262,7 @@ pub enum QueryAnswerEx<'tl> {
         request_id: &'tl [u8; 32],
         answer: &'tl [u8],
         #[tl(flags)]
-        flags: (),
+        _flags: (),
         #[tl(flags_bit = 0)]
         final_info: Option<QueryFinalInfo<'tl>>,
     },
@@ -257,7 +273,7 @@ pub enum QueryAnswerEx<'tl> {
         error_code: i32,
         error: &'tl [u8],
         #[tl(flags)]
-        flags: (),
+        _flags: (),
         #[tl(flags_bit = 0)]
         final_info: Option<QueryFinalInfo<'tl>>,
     },
@@ -267,7 +283,7 @@ pub enum QueryAnswerEx<'tl> {
         request_id: &'tl [u8; 32],
         answer: &'tl [u8],
         #[tl(flags)]
-        flags: (),
+        _flags: (),
         #[tl(flags_bit = 0)]
         final_info: Option<QueryFinalInfo<'tl>>,
     },
@@ -278,7 +294,7 @@ pub enum QueryAnswerEx<'tl> {
 pub fn encode_connect_to_proxy(owner_address: &str, min_config_version: i32) -> Vec<u8> {
     tl_proto::serialize(ClientConnectToProxy {
         params: ClientParams {
-            flags: (),
+            _flags: (),
             client_owner_address: owner_address.as_bytes(),
             is_test: Some(false),
             min_proto_version: Some(1),
@@ -330,8 +346,9 @@ pub fn encode_http_request(
 
 /// Encodes `client.runQueryEx`.
 ///
-/// This is intentionally manual rather than `TlWrite`-derived because exact
-/// field order and primitive encoding are critical for proxy compatibility.
+/// The `timeout` field uses a custom writer because `tl-proto`'s native `f64`
+/// serializer does not write the raw IEEE-754 representation expected by the
+/// Cocoon C++ implementation.
 #[must_use]
 pub fn encode_run_query_ex(
     model: &str,
@@ -339,26 +356,18 @@ pub fn encode_run_query_ex(
     request_id: &[u8; 32],
     options: RunQueryOptions,
 ) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(&0xf54c_b74b_u32.to_le_bytes());
-    write_tl_bytes(&mut out, model.as_bytes());
-    write_tl_bytes(&mut out, query);
-    out.extend_from_slice(&options.max_coefficient.to_le_bytes());
-    out.extend_from_slice(&options.max_tokens.to_le_bytes());
-    out.extend_from_slice(&options.timeout.to_bits().to_le_bytes());
-    out.extend_from_slice(request_id);
-    out.extend_from_slice(&options.min_config_version.to_le_bytes());
-
-    let mut flags = 1u32;
-    if options.public_key.is_some() {
-        flags |= 2;
-    }
-    out.extend_from_slice(&flags.to_le_bytes());
-    write_tl_bool(&mut out, false);
-    if let Some(public_key) = options.public_key {
-        out.extend_from_slice(&public_key);
-    }
-    out
+    tl_proto::serialize(ClientRunQueryEx {
+        model: model.as_bytes(),
+        query,
+        max_coefficient: options.max_coefficient,
+        max_tokens: options.max_tokens,
+        timeout: options.timeout,
+        request_id,
+        min_config_version: options.min_config_version,
+        _flags: (),
+        encrypt: Some(false),
+        public_key: options.public_key.as_ref(),
+    })
 }
 
 /// Decodes `client.connectedToProxy`.
@@ -411,37 +420,8 @@ pub fn decode_http_response(raw: &[u8]) -> Result<HttpResponse<'_>> {
     tl_proto::deserialize::<HttpResponse>(raw).context("decode http.response")
 }
 
-/// Writes a TL byte string with the required four-byte alignment.
-#[allow(clippy::branches_sharing_code, clippy::cast_possible_truncation)]
-fn write_tl_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
-    let len = bytes.len();
-    if len < 254 {
-        out.push(len as u8);
-        out.extend_from_slice(bytes);
-        pad_to_four(out);
-    } else {
-        out.push(254);
-        out.push((len & 0xff) as u8);
-        out.push(((len >> 8) & 0xff) as u8);
-        out.push(((len >> 16) & 0xff) as u8);
-        out.extend_from_slice(bytes);
-        pad_to_four(out);
-    }
-}
-
-/// Writes the boxed TL boolean constructor used by Cocoon.
-fn write_tl_bool(out: &mut Vec<u8>, value: bool) {
-    let magic = if value {
-        0x9972_75b5_u32
-    } else {
-        0xbc79_9737_u32
-    };
-    out.extend_from_slice(&magic.to_le_bytes());
-}
-
-/// Pads the current buffer to the next TL four-byte boundary.
-fn pad_to_four(out: &mut Vec<u8>) {
-    while !out.len().is_multiple_of(4) {
-        out.push(0);
-    }
+/// Writes a Cocoon-compatible raw TL `double`.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn write_raw_f64<P: tl_proto::TlPacket>(value: &f64, packet: &mut P) {
+    packet.write_u64(value.to_bits());
 }

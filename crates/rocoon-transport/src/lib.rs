@@ -57,7 +57,6 @@ struct TcpPacketOut<'a> {
 /// Incoming TL packet variants inside Cocoon session frames.
 #[derive(Debug, TlRead)]
 #[tl(boxed)]
-#[allow(dead_code)]
 enum TcpPacket<'tl> {
     #[tl(id = 0xbbe9627c)]
     Ping { id: i64 },
@@ -170,8 +169,10 @@ impl<RW: Read + Write> Session<RW> {
                     let pong = tl_proto::serialize(TcpPong { id });
                     self.send_frame(&pong).context("send tcp.pong")?;
                 }
-                TcpPacket::Pong { .. }
-                | TcpPacket::Packet { .. }
+                TcpPacket::Pong { id } => {
+                    let _ = id;
+                }
+                TcpPacket::Packet { .. }
                 | TcpPacket::QueryAnswer { .. }
                 | TcpPacket::QueryError { .. } => {}
             }
@@ -273,9 +274,10 @@ impl<RW: Read + Write> Session<RW> {
                     let pong = tl_proto::serialize(TcpPong { id });
                     self.send_frame(&pong).context("send tcp.pong")?;
                 }
-                TcpPacket::Pong { .. }
-                | TcpPacket::QueryAnswer { .. }
-                | TcpPacket::QueryError { .. } => {}
+                TcpPacket::Pong { id } => {
+                    let _ = id;
+                }
+                TcpPacket::QueryAnswer { .. } | TcpPacket::QueryError { .. } => {}
             }
         }
     }
