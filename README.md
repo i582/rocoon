@@ -16,7 +16,9 @@ Current scope:
 - Implement `/v1/chat/completions` and `/v1/completions` through `client.runQueryEx`.
 - Collect streamed Cocoon answer parts before returning the local HTTP response.
 - Expose local runtime statistics through `/stats`, `/jsonstats`, and `/v1/stats`.
-- Read Cocoon wallet balance/seqno from TON liteservers without sending transactions.
+- Read Cocoon wallet/client-contract state from TON liteservers.
+- Send owner control transactions through the Cocoon wallet for `/request/withdraw` and `/request/close`.
+- Sweep the closed Cocoon wallet balance back to the owner wallet through `/wallet/withdraw`.
 
 Workspace layout:
 
@@ -33,7 +35,7 @@ Workspace layout:
 Not implemented yet:
 
 - TON root contract reading.
-- Cocoon wallet deploy/top-up/register.
+- Cocoon wallet top-up/register.
 - RA-TLS/TEE quote verification.
 - True local HTTP streaming; streamed Cocoon chunks are aggregated before the local response is sent.
 
@@ -86,11 +88,11 @@ wallet address. `rocoon` derives the Cocoon wallet smart-contract address from
 `client.owner_address` and `client.node_wallet_key`, then sends that derived
 contract address in `client.connectToProxy`.
 
-`[ton]` is read-only. It uses TON liteservers to fill `/stats.wallet.balance`,
-`/stats.wallet.seqno`, account state, last transaction logical time, and the
-masterchain seqno used for the read. It does not deploy contracts, top up
-wallets, or send external messages. Omit `config_path` to use the built-in
-mainnet/testnet config from `ton-rs`.
+`[ton]` uses TON liteservers to fill `/stats.wallet.*`,
+`/stats.client_contract.*`, and the masterchain seqno used for the read. The
+same liteclient path sends signed external messages for explicit control
+endpoints. It does not top up or register contracts. Omit `config_path` to use
+the built-in mainnet/testnet config from `ton-rs`.
 
 Use a different config file:
 
@@ -109,6 +111,8 @@ API:
 ```bash
 curl http://127.0.0.1:9999/v1/models
 curl http://127.0.0.1:9999/stats
+curl http://127.0.0.1:9999/request/close
+curl http://127.0.0.1:9999/wallet/withdraw
 curl http://127.0.0.1:9999/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"Qwen/Qwen3-32B","messages":[{"role":"user","content":"Say hello"}],"max_tokens":8}'
@@ -117,9 +121,16 @@ curl http://127.0.0.1:9999/v1/chat/completions \
 `/stats` returns locally observed request counters, token usage from Cocoon
 `final_info`, worker response `usage.total_cost`, proxy/debug strings from the
 last request, proxy connection metadata, and the derived Cocoon wallet address.
-When `[ton].readonly_enabled` is true, it also returns read-only TON wallet
-balance, seqno, account state, last transaction logical time, and masterchain
-seqno.
+When `[ton].readonly_enabled` is true, it also returns TON wallet balance,
+seqno, account state, last transaction logical time, client-contract state,
+stake/balance/tokens fields, and masterchain seqno.
+
+Control endpoints:
+
+- `GET/POST /request/withdraw` sends `owner_client_withdraw` to the current client contract.
+- `GET/POST /request/close` sends `owner_client_request_refund` to the current client contract.
+- `GET/POST /wallet/withdraw` sends the sweepable Cocoon wallet balance to `client.owner_address` after the client contract is already `closed`.
+- `/wallet/withdraw` keeps `100000000` nanotons by default for fees; override with `?reserve_nanotons=<value>` or JSON `{"reserve_nanotons":100000000}`.
 
 When the proxy returns `auth: short`, `rocoon` uses `client.secret` or
 `COCOON_CLIENT_SECRET` to call `client.authorizeWithProxyShort`.
@@ -127,8 +138,9 @@ When the proxy returns `auth: short`, `rocoon` uses `client.secret` or
 When the proxy returns `auth: long`, `rocoon` stops before register/top-up,
 because that requires on-chain TON transactions.
 
-The server does not send TON transactions. `/v1/chat/completions` spends
-Cocoon tokens through the existing authorized client balance.
+`/v1/chat/completions` spends Cocoon tokens through the existing authorized
+client balance. The control endpoints send TON transactions, so keep them
+bound to localhost unless you add authentication in front of the server.
 
 ## License
 

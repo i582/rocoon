@@ -7,8 +7,6 @@
 //! `ton_core` primitives from ton-rs instead of maintaining our own TON
 //! cell/BOC/address code.
 
-use std::str::FromStr;
-
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
@@ -31,28 +29,36 @@ const COCOON_WALLET_CODE_BOC_HEX: &str = concat!(
     "b9f2d40bf800029320d74a96d307d402fb00e83001a4c8cb1f14cb1f12cbffcb1f01cf16c9ed545d2b2126"
 );
 
-/// Derives the Cocoon wallet smart-contract address from C++ client config data.
-///
-/// The resulting string is the mainnet, non-bounceable user-friendly address
-/// equivalent to `CocoonWallet::address().rserialize(true)` in the C++ client.
-pub fn derive_cocoon_wallet_address(owner_address: &str, node_wallet_key: &str) -> Result<String> {
-    let owner =
-        TonAddress::from_str(owner_address).context("parse client.owner_address as TON address")?;
-    let private_key = decode_node_wallet_key(node_wallet_key)?;
-    let public_key = SigningKey::from_bytes(&private_key)
-        .verifying_key()
-        .to_bytes();
-
-    let code = TonCell::from_boc_hex(COCOON_WALLET_CODE_BOC_HEX)
-        .context("parse Cocoon wallet code BOC")?;
-    let data = cocoon_wallet_init_data(&owner, &public_key)?;
+/// Derives the Cocoon wallet address from an already decoded Ed25519 seed.
+pub fn derive_cocoon_wallet_address_from_seed(
+    owner: &TonAddress,
+    private_key: &[u8; 32],
+) -> Result<String> {
+    let code = cocoon_wallet_code()?;
+    let data = cocoon_wallet_init_data_from_seed(owner, private_key)?;
     let address =
         derive_address(code, data, owner.workchain).context("derive Cocoon wallet address")?;
 
     Ok(address.to_base64(true, false, true))
 }
 
-fn decode_node_wallet_key(value: &str) -> Result<[u8; 32]> {
+/// Returns the Cocoon wallet code cell used by the C++ client.
+pub fn cocoon_wallet_code() -> Result<TonCell> {
+    TonCell::from_boc_hex(COCOON_WALLET_CODE_BOC_HEX).context("parse Cocoon wallet code BOC")
+}
+
+/// Builds the Cocoon wallet data cell from owner address and Ed25519 seed.
+pub fn cocoon_wallet_init_data_from_seed(
+    owner: &TonAddress,
+    private_key: &[u8; 32],
+) -> Result<TonCell> {
+    let public_key = SigningKey::from_bytes(private_key)
+        .verifying_key()
+        .to_bytes();
+    cocoon_wallet_init_data(owner, &public_key)
+}
+
+pub fn decode_node_wallet_key(value: &str) -> Result<[u8; 32]> {
     let trimmed = value.trim();
     let decoded = STANDARD
         .decode(trimmed)
@@ -95,13 +101,13 @@ fn derive_address(code: TonCell, data: TonCell, workchain: i32) -> Result<TonAdd
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     #[test]
     fn derives_known_cocoon_wallet_address() -> Result<()> {
-        let address = derive_cocoon_wallet_address(
-            "UQD5MEMHNCHR-zkATB3elGUvRfNiZAlK_luIj0matDI1xH_H",
-            "Eeo22fSR51UZHS9xUVwCGj4oIGa2pGGydUDHfG+YcEw=",
-        )?;
+        let owner = TonAddress::from_str("UQD5MEMHNCHR-zkATB3elGUvRfNiZAlK_luIj0matDI1xH_H")?;
+        let seed = decode_node_wallet_key("Eeo22fSR51UZHS9xUVwCGj4oIGa2pGGydUDHfG+YcEw=")?;
+        let address = derive_cocoon_wallet_address_from_seed(&owner, &seed)?;
 
         assert_eq!(address, "UQA9iqwh-HWRz20_M4h5idcVcVesVHL6KVeaaJdCU5Ydq2Bi");
         Ok(())

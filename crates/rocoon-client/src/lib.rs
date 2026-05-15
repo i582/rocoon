@@ -10,7 +10,12 @@ mod ton_readonly;
 mod wallet;
 
 pub use client::{
-    AuthPaymentStatus, ClientStatus, CocoonClient, HttpExchange, ModelInfo, WorkerInfo,
+    AuthPaymentStatus, ClientStatus, CocoonClient, ControlRequestStatus, HttpExchange, ModelInfo,
+    WalletTransferStatus, WorkerInfo,
 };
 pub use config::RuntimeConfig;
 pub use rocoon_transport::{QueryFinalInfo, TokenUsage};
+pub use ton_readonly::{
+    COCOON_WALLET_RESERVE_NANOTONS, ClientContractSnapshot, TonAccountState, TonControlAction,
+    TonControlResult, TonWalletTransferResult,
+};

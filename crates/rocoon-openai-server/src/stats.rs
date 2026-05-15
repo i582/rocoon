@@ -139,7 +139,8 @@ impl ServerStats {
                 "proto_version": client.proto_version,
                 "active_proxy_connections": client.active_proxy_connections,
                 "proxy_owner_address": &client.proxy_owner_address,
-                "proxy_sc_address": &client.proxy_sc_address
+                "proxy_sc_address": &client.proxy_sc_address,
+                "client_sc_address": &client.client_sc_address
             },
             "blockchain": {
                 "network": "ton",
@@ -147,6 +148,7 @@ impl ServerStats {
                 "masterchain_seqno": client.masterchain_seqno,
                 "root_contract_polling": false
             },
+            "client_contract": client_contract_json(client),
             "wallet": {
                 "address": &client.cocoon_wallet_address,
                 "balance": client.wallet_balance,
@@ -154,8 +156,10 @@ impl ServerStats {
                 "seqno": client.wallet_seqno,
                 "state": &client.wallet_state,
                 "last_tx_lt": client.wallet_last_tx_lt,
-                "pending_transactions_cnt": Value::Null,
-                "active_transactions_cnt": Value::Null,
+                "pending_transactions_cnt": client.wallet_pending_transactions,
+                "active_transactions_cnt": client.wallet_active_transactions,
+                "wallet_transfer_running": client.wallet_transfer.is_some(),
+                "wallet_transfer": wallet_transfer_json(client),
                 "source": wallet_source(client)
             },
             "payment": {
@@ -364,6 +368,54 @@ const fn wallet_source(client: &ClientStatus) -> &'static str {
         (true, true) => "ton_liteclient",
         (true, false) => "ton_liteclient_error",
     }
+}
+
+fn client_contract_json(client: &ClientStatus) -> Value {
+    let Some(contract) = &client.client_contract else {
+        return Value::Null;
+    };
+    json!({
+        "address": &client.client_sc_address,
+        "account_state": contract.account_state.as_str(),
+        "account_balance": contract.account_balance,
+        "account_balance_ton": contract.account_balance.map(format_nanotons_u64_as_ton),
+        "last_tx_lt": contract.last_tx_lt,
+        "state": contract.state,
+        "state_raw": contract.state_raw,
+        "balance": contract.balance,
+        "balance_ton": contract.balance.map(format_nanotons_u64_as_ton),
+        "stake": contract.stake,
+        "stake_ton": contract.stake.map(format_nanotons_u64_as_ton),
+        "tokens_used": contract.tokens_used,
+        "unlock_ts": contract.unlock_ts,
+        "withdrawable_balance": contract.withdrawable_balance,
+        "withdrawable_balance_ton": contract.withdrawable_balance.map(format_nanotons_u64_as_ton),
+        "sc_request_running": client.sc_request_running,
+        "sc_request": control_request_json(client)
+    })
+}
+
+fn control_request_json(client: &ClientStatus) -> Value {
+    let Some(request) = &client.sc_request else {
+        return Value::Null;
+    };
+    json!({
+        "action": request.action.as_str(),
+        "query_id": request.query_id,
+        "wallet_seqno": request.wallet_seqno
+    })
+}
+
+fn wallet_transfer_json(client: &ClientStatus) -> Value {
+    let Some(request) = &client.wallet_transfer else {
+        return Value::Null;
+    };
+    json!({
+        "destination_address": &request.destination_address,
+        "amount": request.amount,
+        "amount_ton": format_nanotons_u64_as_ton(request.amount),
+        "wallet_seqno": request.wallet_seqno
+    })
 }
 
 /// Converts a byte length to `u64` without panicking on unusual platforms.

@@ -8,8 +8,10 @@
 
 use std::env;
 use std::ffi::OsString;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -38,6 +40,8 @@ pub struct RuntimeConfig {
     pub listen_addr: String,
     /// External TON wallet address that owns the Cocoon wallet contract.
     pub owner_address: String,
+    /// Decoded Ed25519 seed used by the Cocoon wallet contract.
+    pub node_wallet_key: NodeWalletKey,
     /// Derived Cocoon wallet smart-contract address used in `client.connectToProxy`.
     pub cocoon_wallet_address: String,
     /// Shared secret for short proxy authorization.
@@ -53,6 +57,10 @@ pub struct RuntimeConfig {
     /// TON liteclient read-only settings used by `/stats`.
     pub ton: TonRuntimeConfig,
 }
+
+/// Decoded Cocoon wallet Ed25519 seed with redacted formatting.
+#[derive(Clone)]
+pub struct NodeWalletKey([u8; 32]);
 
 /// Validated read-only TON liteclient configuration.
 #[derive(Debug, Clone)]
@@ -194,9 +202,15 @@ impl RuntimeConfig {
                 .context("parse ROCOON_TON_QUERY_TIMEOUT_MILLIS")?;
         }
         validate(&config)?;
-        let cocoon_wallet_address = wallet::derive_cocoon_wallet_address(
-            &config.client.owner_address,
-            &config.client.node_wallet_key,
+        let owner_address = ton_core::types::TonAddress::from_str(&config.client.owner_address)
+            .context("parse client.owner_address as TON address")?;
+        let node_wallet_key = NodeWalletKey(
+            wallet::decode_node_wallet_key(&config.client.node_wallet_key)
+                .context("decode client.node_wallet_key")?,
+        );
+        let cocoon_wallet_address = wallet::derive_cocoon_wallet_address_from_seed(
+            &owner_address,
+            node_wallet_key.seed(),
         )
         .context(
             "derive Cocoon wallet address from client.owner_address and client.node_wallet_key",
@@ -208,6 +222,7 @@ impl RuntimeConfig {
             connect_timeout: Duration::from_secs(config.network.connect_timeout_secs),
             listen_addr: config.server.listen_addr,
             owner_address: config.client.owner_address,
+            node_wallet_key,
             cocoon_wallet_address,
             client_secret: config.client.secret,
             min_config_version: config.client.min_config_version,
@@ -222,6 +237,19 @@ impl RuntimeConfig {
                 query_timeout_millis: config.ton.query_timeout_millis,
             },
         })
+    }
+}
+
+impl NodeWalletKey {
+    /// Returns the decoded Ed25519 seed for internal signing code.
+    pub(crate) const fn seed(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for NodeWalletKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("NodeWalletKey(<redacted>)")
     }
 }
 

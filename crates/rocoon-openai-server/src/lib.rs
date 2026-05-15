@@ -15,7 +15,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 
-use rocoon_client::{CocoonClient, HttpExchange};
+use rocoon_client::{COCOON_WALLET_RESERVE_NANOTONS, CocoonClient, HttpExchange, TonControlAction};
 
 mod stats;
 use stats::{CompletionFailure, CompletionSuccess, ServerStats};
@@ -54,6 +54,12 @@ struct CompletionRequest {
     max_coefficient: i32,
     max_tokens: i32,
     timeout: f64,
+}
+
+/// Request shape for sweeping the Cocoon wallet after contract close.
+struct WalletSweepRequest {
+    destination_address: Option<String>,
+    reserve_nanotons: u64,
 }
 
 /// Serves the local OpenAI-compatible API forever.
@@ -103,13 +109,22 @@ fn handle_connection(
 ) -> std::result::Result<(), HttpError> {
     let request = read_http_request(&mut stream)
         .map_err(|error| HttpError::new(stream.try_clone().ok(), 400, &error))?;
-    let path = request.path.split('?').next().unwrap_or(&request.path);
+    let (path, query) = split_path_query(&request.path);
 
     match (request.method.as_str(), path) {
         ("GET", "/health") => write_json(&mut stream, 200, &json!({"status": "ok"}), Vec::new())
             .map_err(|error| HttpError::new(None, 500, &error)),
         ("GET", "/stats" | "/jsonstats" | "/v1/stats") => handle_stats(&mut stream, state),
         ("GET", "/v1/models") => handle_models(&mut stream, state),
+        ("GET" | "POST", "/request/withdraw") => {
+            handle_control(&mut stream, state, TonControlAction::Withdraw, query)
+        }
+        ("GET" | "POST", "/request/close") => {
+            handle_control(&mut stream, state, TonControlAction::RequestRefund, query)
+        }
+        ("GET" | "POST", "/wallet/withdraw" | "/wallet/sweep") => {
+            handle_wallet_sweep(&mut stream, state, query, &request.body)
+        }
         ("POST", "/v1/chat/completions" | "/v1/completions") => {
             handle_completion(&mut stream, state, defaults, path, &request.body)
         }
@@ -176,6 +191,81 @@ fn handle_models(
         stream,
         200,
         &json!({"object": "list", "data": data}),
+        Vec::new(),
+    )
+    .map_err(|error| HttpError::new(None, 500, &error))
+}
+
+/// Sends a Cocoon client-contract control message via the local wallet.
+fn handle_control(
+    stream: &mut TcpStream,
+    state: &ServerState,
+    action: TonControlAction,
+    query: &str,
+) -> std::result::Result<(), HttpError> {
+    let proxy = query_param(query, "proxy");
+    let result = state
+        .client
+        .lock()
+        .map_err(|_| {
+            HttpError::message(stream.try_clone().ok(), 500, "Cocoon client mutex poisoned")
+        })?
+        .request_control(action, proxy.as_deref())
+        .map_err(|error| HttpError::new(stream.try_clone().ok(), 502, &error))?;
+    write_json(
+        stream,
+        200,
+        &json!({
+            "object": "rocoon.control",
+            "status": "sent",
+            "action": result.action.as_str(),
+            "query_id": result.query_id,
+            "wallet_seqno": result.wallet_seqno,
+            "attached_value": result.attached_value,
+            "send_status": result.send_status,
+            "client_sc_address": result.client_contract_address,
+            "wallet_address": result.wallet_address
+        }),
+        Vec::new(),
+    )
+    .map_err(|error| HttpError::new(None, 500, &error))
+}
+
+/// Sends sweepable Cocoon wallet funds back to the owner wallet.
+fn handle_wallet_sweep(
+    stream: &mut TcpStream,
+    state: &ServerState,
+    query: &str,
+    body: &[u8],
+) -> std::result::Result<(), HttpError> {
+    let request = parse_wallet_sweep_request(query, body)
+        .map_err(|error| HttpError::new(stream.try_clone().ok(), 400, &error))?;
+    let result = state
+        .client
+        .lock()
+        .map_err(|_| {
+            HttpError::message(stream.try_clone().ok(), 500, "Cocoon client mutex poisoned")
+        })?
+        .sweep_cocoon_wallet(
+            request.destination_address.as_deref(),
+            request.reserve_nanotons,
+        )
+        .map_err(|error| HttpError::new(stream.try_clone().ok(), 502, &error))?;
+    write_json(
+        stream,
+        200,
+        &json!({
+            "object": "rocoon.wallet_withdraw",
+            "status": "sent",
+            "wallet_seqno": result.wallet_seqno,
+            "amount": result.amount,
+            "amount_ton": format_nanotons_u64_as_ton(result.amount),
+            "reserve": request.reserve_nanotons,
+            "reserve_ton": format_nanotons_u64_as_ton(request.reserve_nanotons),
+            "send_status": result.send_status,
+            "destination_address": result.destination_address,
+            "wallet_address": result.wallet_address
+        }),
         Vec::new(),
     )
     .map_err(|error| HttpError::new(None, 500, &error))
@@ -354,6 +444,52 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
     Ok(HttpRequest { method, path, body })
 }
 
+/// Splits an HTTP request target into path and raw query string.
+fn split_path_query(path: &str) -> (&str, &str) {
+    path.split_once('?')
+        .map_or((path, ""), |(path, query)| (path, query))
+}
+
+/// Reads and URL-decodes a query parameter.
+fn query_param(query: &str, name: &str) -> Option<String> {
+    query
+        .split('&')
+        .filter(|part| !part.is_empty())
+        .find_map(|part| {
+            let (raw_key, raw_value) = part.split_once('=').unwrap_or((part, ""));
+            let key = url_decode_query_component(raw_key)?;
+            (key == name)
+                .then(|| url_decode_query_component(raw_value))
+                .flatten()
+        })
+}
+
+fn url_decode_query_component(value: &str) -> Option<String> {
+    let mut decoded = Vec::with_capacity(value.len());
+    let mut bytes = value.as_bytes().iter().copied();
+    while let Some(byte) = bytes.next() {
+        match byte {
+            b'+' => decoded.push(b' '),
+            b'%' => {
+                let high = bytes.next()?;
+                let low = bytes.next()?;
+                decoded.push((hex_value(high)? << 4) | hex_value(low)?);
+            }
+            _ => decoded.push(byte),
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+const fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// Parses and sanitizes `OpenAI` completion JSON.
 ///
 /// The model name is extracted for Cocoon routing. `Cocoon`-specific knobs
@@ -426,6 +562,95 @@ fn parse_completion_request(body: &[u8], defaults: Defaults) -> Result<Completio
         max_tokens,
         timeout,
     })
+}
+
+/// Parses `/wallet/withdraw` query parameters and optional JSON body.
+fn parse_wallet_sweep_request(query: &str, body: &[u8]) -> Result<WalletSweepRequest> {
+    let mut destination_address = query_param(query, "to")
+        .or_else(|| query_param(query, "destination_address"))
+        .filter(|address| !address.is_empty());
+    let mut reserve_nanotons = query_param(query, "reserve_nanotons")
+        .or_else(|| query_param(query, "reserve"))
+        .map(|value| parse_u64_string("reserve_nanotons", &value))
+        .transpose()?
+        .unwrap_or(COCOON_WALLET_RESERVE_NANOTONS);
+    if let Some(amount) = query_param(query, "amount")
+        && amount != "all"
+    {
+        anyhow::bail!("wallet withdraw supports only amount=all");
+    }
+
+    if body.is_empty() {
+        return Ok(WalletSweepRequest {
+            destination_address,
+            reserve_nanotons,
+        });
+    }
+
+    let value: Value = serde_json::from_slice(body).context("parse wallet withdraw JSON")?;
+    let object = value
+        .as_object()
+        .context("wallet withdraw JSON must be an object")?;
+    if let Some(value) = object
+        .get("to")
+        .or_else(|| object.get("destination_address"))
+    {
+        destination_address =
+            json_optional_string(value, "to")?.filter(|address| !address.is_empty());
+    }
+    if let Some(value) = object
+        .get("reserve_nanotons")
+        .or_else(|| object.get("reserve"))
+    {
+        reserve_nanotons = parse_u64_json("reserve_nanotons", value)?;
+    }
+    if let Some(value) = object.get("amount")
+        && !value.is_null()
+        && value.as_str().is_none_or(|amount| amount != "all")
+    {
+        anyhow::bail!("wallet withdraw supports only amount=\"all\"");
+    }
+
+    Ok(WalletSweepRequest {
+        destination_address,
+        reserve_nanotons,
+    })
+}
+
+/// Parses a non-negative integer stored as a query string.
+fn parse_u64_string(field: &str, value: &str) -> Result<u64> {
+    value
+        .parse::<u64>()
+        .with_context(|| format!("parse {field} as u64"))
+}
+
+/// Parses a non-negative integer stored either as JSON number or string.
+fn parse_u64_json(field: &str, value: &Value) -> Result<u64> {
+    if let Some(number) = value.as_u64() {
+        return Ok(number);
+    }
+    if let Some(string) = value.as_str() {
+        return parse_u64_string(field, string);
+    }
+    anyhow::bail!("{field} must be a non-negative integer")
+}
+
+/// Reads an optional string field from JSON.
+fn json_optional_string(value: &Value, field: &str) -> Result<Option<String>> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    value
+        .as_str()
+        .map(|value| Some(value.to_string()))
+        .with_context(|| format!("{field} must be a string or null"))
+}
+
+/// Formats a nanoton amount as a fixed 9-decimal TON string.
+fn format_nanotons_u64_as_ton(value: u64) -> String {
+    let whole = value / 1_000_000_000;
+    let frac = value % 1_000_000_000;
+    format!("{whole}.{frac:09}")
 }
 
 /// Writes a Cocoon worker HTTP response back to the local client.
