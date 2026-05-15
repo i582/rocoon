@@ -8,14 +8,13 @@ use std::process;
 use anyhow::{Context, Result};
 use clap::{ColorChoice, CommandFactory, Parser, Subcommand};
 use rocoon_client::{
-    COCOON_WALLET_RESERVE_NANOTONS, CocoonClient, RuntimeConfig,
-    is_client_contract_closed_or_closing_error,
+    COCOON_WALLET_RESERVE_NANOTONS, CocoonClient, is_client_contract_closed_or_closing_error,
+};
+use rocoon_config::{
+    RuntimeConfig,
+    color::{ColorMode, OwoColorize, init_color_mode},
 };
 use rocoon_openai_server::{Defaults, serve};
-
-mod color;
-
-use color::{ColorMode, OwoColorize, init_color_mode};
 
 const NANOTONS_PER_TON: u64 = 1_000_000_000;
 const STATE_FILE_NAME: &str = ".rocoon-state";

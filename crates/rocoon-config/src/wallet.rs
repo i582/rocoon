@@ -15,6 +15,11 @@ use ton::block_tlb::StateInit;
 use ton_core::types::TonAddress;
 
 /// Derives the Cocoon wallet address from an already decoded Ed25519 seed.
+///
+/// # Errors
+///
+/// Returns an error if the Cocoon wallet state init cannot be built or the TON
+/// address cannot be derived from it.
 pub fn derive_cocoon_wallet_address_from_seed(
     owner: &TonAddress,
     private_key: &[u8; 32],
@@ -28,6 +33,11 @@ pub fn derive_cocoon_wallet_address_from_seed(
 }
 
 /// Builds the Cocoon wallet state init from owner address and Ed25519 seed.
+///
+/// # Errors
+///
+/// Returns an error if the Cocoon wallet state init cannot be serialized from
+/// the owner address and derived public key.
 pub fn cocoon_wallet_state_init_from_seed(
     owner: &TonAddress,
     private_key: &[u8; 32],
@@ -39,6 +49,12 @@ pub fn cocoon_wallet_state_init_from_seed(
         .context("build Cocoon wallet state init")
 }
 
+/// Decodes a base64-encoded 32-byte node wallet key.
+///
+/// # Errors
+///
+/// Returns an error if the value is not valid standard or URL-safe base64, or
+/// if it does not decode to exactly 32 bytes.
 pub fn decode_node_wallet_key(value: &str) -> Result<[u8; 32]> {
     let trimmed = value.trim();
     let decoded = STANDARD

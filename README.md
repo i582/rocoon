@@ -27,6 +27,8 @@ Workspace layout:
   and message bodies.
 - `rocoon-transport`: reusable Cocoon proxy transport stack: TCP PoW, RA-TLS,
   `tcp.query`, `tcp.packet`, ping/pong, and `runQueryEx` answer aggregation.
+- `rocoon-config`: config loading, Cocoon wallet identity derivation, and CLI
+  color-mode helpers.
 - `rocoon-client`: high-level Cocoon client API: proxy authorization, model
   discovery, and completion requests.
 - `rocoon-openai-server`: local OpenAI-compatible HTTP bridge over
@@ -36,15 +38,14 @@ Workspace layout:
 
 Not implemented yet:
 
-- TON root contract reading.
-- Cocoon wallet top-up/register.
+- TON root contract stats polling.
 - RA-TLS/TEE quote verification.
 - True local HTTP streaming; streamed Cocoon chunks are aggregated before the local response is sent.
 
 Run:
 
 ```bash
-cargo run -- start
+rocoon start
 ```
 
 Checks:
@@ -78,7 +79,6 @@ max_tokens = 10000
 timeout_secs = 120.0
 
 [ton]
-readonly_enabled = true
 mainnet = true
 query_timeout_millis = 5000
 # config_path = "/path/to/global.config.json"
@@ -93,22 +93,23 @@ contract address in `client.connectToProxy`.
 `[ton]` uses TON liteservers to fill `/stats.wallet.*`,
 `/stats.client_contract.*`, and the masterchain seqno used for the read. The
 same liteclient path sends signed external messages for explicit CLI controls.
-It does not top up or register contracts. Omit `config_path` to use
-rocoon's embedded mainnet config, or the `ton-rs` default when `mainnet = false`.
+It is also used for long-auth registration and client-contract top-up. Omit
+`config_path` to use rocoon's embedded mainnet config, or the `ton-rs` default
+when `mainnet = false`.
 
 Use a different config file:
 
 ```bash
-cargo run -- --config path/to/rocoon.toml start
+rocoon --config path/to/rocoon.toml start
 ```
 
 CLI one-shot controls:
 
 ```bash
-cargo run -- request-withdraw
-cargo run -- close
-cargo run -- withdraw --client-contract <client-contract-address>
-cargo run -- withdraw --to <destination-address> --reserve-nanotons 100000000
+rocoon request-withdraw
+rocoon close
+rocoon withdraw --client-contract <client-contract-address>
+rocoon withdraw --to <destination-address> --reserve-nanotons 100000000
 ```
 
 `request-withdraw` sends `owner_client_withdraw` from the client contract to the
@@ -124,7 +125,7 @@ When the proxy reports that the cached client contract is closing or closed,
 Environment overrides:
 
 ```bash
-COCOON_PROXY_ADDR=91.108.4.11:8888 COCOON_OWNER_ADDRESS=<owner-wallet-address> COCOON_NODE_WALLET_KEY=... COCOON_CLIENT_SECRET=... ROCOON_TON_READONLY_ENABLED=true cargo run -- start
+COCOON_PROXY_ADDR=91.108.4.11:8888 COCOON_OWNER_ADDRESS=<owner-wallet-address> COCOON_NODE_WALLET_KEY=... COCOON_CLIENT_SECRET=... rocoon start
 ```
 
 API:
@@ -140,15 +141,15 @@ curl http://127.0.0.1:9999/v1/chat/completions \
 `/stats` returns locally observed request counters, token usage from Cocoon
 `final_info`, worker response `usage.total_cost`, proxy/debug strings from the
 last request, proxy connection metadata, and the derived Cocoon wallet address.
-When `[ton].readonly_enabled` is true, it also returns TON wallet balance,
-seqno, account state, last transaction logical time, client-contract state,
-stake/balance/tokens fields, and masterchain seqno.
+It also returns TON wallet balance, seqno, account state, last transaction
+logical time, client-contract state, stake/balance/tokens fields, and
+masterchain seqno.
 
 When the proxy returns `auth: short`, `rocoon` uses `client.secret` or
 `COCOON_CLIENT_SECRET` to call `client.authorizeWithProxyShort`.
 
-When the proxy returns `auth: long`, `rocoon` stops before register/top-up,
-because that requires on-chain TON transactions.
+When the proxy returns `auth: long`, `rocoon` prepares and sends the required
+on-chain registration through the Cocoon wallet.
 
 `/v1/chat/completions` spends Cocoon tokens through the existing authorized
 client balance. TON control transactions are available only through the CLI

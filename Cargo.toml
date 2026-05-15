@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/rocoon-config",
     "crates/rocoon-client",
     "crates/rocoon-openai-server",
     "crates/rocoon-openai-types",
@@ -38,6 +39,7 @@ panic = "deny"
 
 [workspace.dependencies]
 rocoon-client = { path = "crates/rocoon-client" }
+rocoon-config = { path = "crates/rocoon-config" }
 rocoon-openai-server = { path = "crates/rocoon-openai-server" }
 rocoon-openai-types = { path = "crates/rocoon-openai-types" }
 rocoon-protocol = { path = "crates/rocoon-protocol" }
@@ -78,6 +80,6 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-owo-colors.workspace = true
 rocoon-client = { workspace = true }
+rocoon-config = { workspace = true }
 rocoon-openai-server = { workspace = true }

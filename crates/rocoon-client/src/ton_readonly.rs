@@ -32,7 +32,7 @@ use ton::ton_core::types::tlb_core::{
 };
 use ton_core::errors::TonCoreError;
 
-use crate::{config::TonRuntimeConfig, wallet};
+use rocoon_config::{TonRuntimeConfig, wallet};
 
 const OWNER_CLIENT_REGISTER: u32 = 0xc45f_9f3b;
 const OWNER_CLIENT_CHANGE_SECRET_HASH: u32 = 0xa935_7034;
@@ -58,8 +58,6 @@ pub struct TonReadonlyClient {
 /// Current TON state relevant to local diagnostics.
 #[derive(Clone, Debug)]
 pub struct TonReadonlySnapshot {
-    /// Whether read-only TON polling is enabled by config.
-    pub enabled: bool,
     /// Whether the last read-only query succeeded.
     pub ok: bool,
     /// Last read-only error formatted for diagnostics.
@@ -914,7 +912,6 @@ impl TonReadonlyClient {
             None
         };
         Ok(TonReadonlySnapshot {
-            enabled: true,
             ok: true,
             last_error: None,
             masterchain_seqno: Some(masterchain.last.seqno),
@@ -974,22 +971,9 @@ impl TonReadonlyClient {
 }
 
 impl TonReadonlySnapshot {
-    /// Snapshot for disabled TON polling.
-    pub const fn disabled() -> Self {
-        Self {
-            enabled: false,
-            ok: false,
-            last_error: None,
-            masterchain_seqno: None,
-            wallet: None,
-            client_contract: None,
-        }
-    }
-
     /// Snapshot for a configured liteclient that could not be initialized.
     pub const fn failed(error: String) -> Self {
         Self {
-            enabled: true,
             ok: false,
             last_error: Some(error),
             masterchain_seqno: None,
@@ -1689,6 +1673,7 @@ mod tests {
         build_wallet_external_message, client_register_attached_value, client_top_up_amount,
         read_cocoon_wallet_seqno, validate_cocoon_wallet_can_send_value,
     };
+    use rocoon_config::wallet;
     use rocoon_contract::OWNER_CLIENT_WITHDRAW;
     use std::str::FromStr;
     use ton::block_tlb::{MaybeAccount, Msg};
@@ -1835,8 +1820,7 @@ mod tests {
     fn wallet_external_message_adds_state_init_for_seqno_zero() -> anyhow::Result<()> {
         let owner = TonAddress::from_str("UQD5MEMHNCHR-zkATB3elGUvRfNiZAlK_luIj0matDI1xH_H")?;
         let wallet = TonAddress::from_str("UQA9iqwh-HWRz20_M4h5idcVcVesVHL6KVeaaJdCU5Ydq2Bi")?;
-        let seed =
-            crate::wallet::decode_node_wallet_key("Eeo22fSR51UZHS9xUVwCGj4oIGa2pGGydUDHfG+YcEw=")?;
+        let seed = wallet::decode_node_wallet_key("Eeo22fSR51UZHS9xUVwCGj4oIGa2pGGydUDHfG+YcEw=")?;
 
         let first_message =
             build_wallet_external_message(&wallet, &owner, &seed, 0, TonCell::empty().to_owned())?;

@@ -17,7 +17,6 @@ use anyhow::{Context, Result};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 
-use crate::config::{RuntimeConfig, TonRuntimeConfig};
 use crate::ton_readonly::{
     COCOON_WALLET_MIN_BALANCE_NANOTONS, COCOON_WALLET_RESERVE_NANOTONS,
     CONTROL_MESSAGE_VALUE_NANOTONS, ClientContractSnapshot, TonAccountState,
@@ -28,6 +27,7 @@ use crate::ton_readonly::{
     TonReadonlySnapshot, TonWalletSnapshot, TonWalletTransferPreparedMessage,
     TonWalletTransferRequest, TonWalletTransferResult,
 };
+use rocoon_config::{RuntimeConfig, TonRuntimeConfig};
 use rocoon_protocol::{self as cocoon, RunQueryOptions, WorkerInstanceV2, WorkerTypeV2};
 use rocoon_transport::{QueryError, QueryFinalInfo, RunQueryOutput, Session, pow, ratls};
 
@@ -137,8 +137,6 @@ pub struct ClientStatus {
     pub client_sc_address: String,
     /// Short-auth payment metadata returned by the proxy.
     pub payment_status: AuthPaymentStatus,
-    /// Whether read-only TON liteserver polling is enabled.
-    pub ton_readonly_enabled: bool,
     /// Whether the latest read-only TON query succeeded.
     pub ton_readonly_ok: bool,
     /// Last read-only TON query/init error.
@@ -495,7 +493,6 @@ impl CocoonClient {
             proxy_sc_address: self.proxy_sc_address.clone(),
             client_sc_address: self.client_sc_address.clone(),
             payment_status: self.payment_status.clone(),
-            ton_readonly_enabled: ton.enabled,
             ton_readonly_ok: ton.ok,
             ton_readonly_error: ton.last_error,
             masterchain_seqno: ton.masterchain_seqno,
@@ -1101,9 +1098,8 @@ impl PendingWalletTransferRequest {
     }
 }
 
-/// Initialization state for optional read-only TON diagnostics.
+/// Initialization state for TON liteclient diagnostics and wallet messages.
 enum TonReadonlyState {
-    Disabled,
     Ready {
         config: TonRuntimeConfig,
         client: TonReadonlyClient,
@@ -1116,9 +1112,6 @@ enum TonReadonlyState {
 
 impl TonReadonlyState {
     fn new(config: &RuntimeConfig) -> Self {
-        if !config.ton.readonly_enabled {
-            return Self::Disabled;
-        }
         match TonReadonlyClient::connect(&config.ton) {
             Ok(client) => Self::Ready {
                 config: config.ton.clone(),
@@ -1137,7 +1130,6 @@ impl TonReadonlyState {
         client_contract_address: &str,
     ) -> TonReadonlySnapshot {
         match self {
-            Self::Disabled => TonReadonlySnapshot::disabled(),
             Self::Failed { config, error } => {
                 let config = config.clone();
                 match TonReadonlyClient::connect(&config) {
@@ -1178,7 +1170,6 @@ impl TonReadonlyState {
         request: &TonControlRequest<'_>,
     ) -> Result<TonControlPreparedMessage> {
         match self {
-            Self::Disabled => anyhow::bail!("TON liteclient is disabled"),
             Self::Failed { error, .. } => anyhow::bail!("TON liteclient is unavailable: {error}"),
             Self::Ready { .. } => TonReadonlyClient::prepare_client_control_message(request),
         }
@@ -1189,7 +1180,6 @@ impl TonReadonlyState {
         request: &TonClientRegisterRequest<'_>,
     ) -> Result<TonClientRegisterPreparedMessage> {
         match self {
-            Self::Disabled => anyhow::bail!("TON liteclient is disabled"),
             Self::Failed { config, error } => {
                 let config = config.clone();
                 match TonReadonlyClient::connect(&config) {
@@ -1229,7 +1219,6 @@ impl TonReadonlyState {
         request: &TonClientSecretHashRequest<'_>,
     ) -> Result<TonClientSecretHashPreparedMessage> {
         match self {
-            Self::Disabled => anyhow::bail!("TON liteclient is disabled"),
             Self::Failed { error, .. } => anyhow::bail!("TON liteclient is unavailable: {error}"),
             Self::Ready { .. } => TonReadonlyClient::prepare_client_secret_hash_message(request),
         }
@@ -1240,7 +1229,6 @@ impl TonReadonlyState {
         request: &TonClientTopUpRequest<'_>,
     ) -> Result<Option<TonClientTopUpPreparedMessage>> {
         match self {
-            Self::Disabled => anyhow::bail!("TON liteclient is disabled"),
             Self::Failed { config, error } => {
                 let config = config.clone();
                 match TonReadonlyClient::connect(&config) {
@@ -1279,7 +1267,6 @@ impl TonReadonlyState {
         message: &TonClientRegisterPreparedMessage,
     ) -> Result<TonClientRegisterResult> {
         match self {
-            Self::Disabled => anyhow::bail!("TON liteclient is disabled"),
             Self::Failed { config, error } => {
                 let config = config.clone();
                 match TonReadonlyClient::connect(&config) {
@@ -1320,7 +1307,6 @@ impl TonReadonlyState {
         message: &TonClientTopUpPreparedMessage,
     ) -> Result<TonClientTopUpResult> {
         match self {
-            Self::Disabled => anyhow::bail!("TON liteclient is disabled"),
             Self::Failed { config, error } => {
                 let config = config.clone();
                 match TonReadonlyClient::connect(&config) {
@@ -1361,7 +1347,6 @@ impl TonReadonlyState {
         message: &TonClientSecretHashPreparedMessage,
     ) -> Result<TonClientSecretHashResult> {
         match self {
-            Self::Disabled => anyhow::bail!("TON liteclient is disabled"),
             Self::Failed { config, error } => {
                 let config = config.clone();
                 match TonReadonlyClient::connect(&config) {
@@ -1402,7 +1387,6 @@ impl TonReadonlyState {
         message: &TonControlPreparedMessage,
     ) -> Result<TonControlResult> {
         match self {
-            Self::Disabled => anyhow::bail!("TON liteclient is disabled"),
             Self::Failed { error, .. } => anyhow::bail!("TON liteclient is unavailable: {error}"),
             Self::Ready { client, .. } => client.send_prepared_control_message(message),
         }
@@ -1413,7 +1397,6 @@ impl TonReadonlyState {
         request: &TonWalletTransferRequest<'_>,
     ) -> Result<TonWalletTransferPreparedMessage> {
         match self {
-            Self::Disabled => anyhow::bail!("TON liteclient is disabled"),
             Self::Failed { error, .. } => anyhow::bail!("TON liteclient is unavailable: {error}"),
             Self::Ready { .. } => TonReadonlyClient::prepare_wallet_transfer_message(request),
         }
@@ -1424,7 +1407,6 @@ impl TonReadonlyState {
         message: &TonWalletTransferPreparedMessage,
     ) -> Result<TonWalletTransferResult> {
         match self {
-            Self::Disabled => anyhow::bail!("TON liteclient is disabled"),
             Self::Failed { error, .. } => anyhow::bail!("TON liteclient is unavailable: {error}"),
             Self::Ready { client, .. } => client.send_prepared_wallet_transfer_message(message),
         }
@@ -1432,7 +1414,6 @@ impl TonReadonlyState {
 
     fn resend_external_message(&self, message: &[u8]) -> Result<u32> {
         match self {
-            Self::Disabled => anyhow::bail!("TON liteclient is disabled"),
             Self::Failed { error, .. } => anyhow::bail!("TON liteclient is unavailable: {error}"),
             Self::Ready { client, .. } => client.send_raw_message(message),
         }
@@ -2067,7 +2048,7 @@ fn wait_for_long_auth_funding(config: &RuntimeConfig) -> Result<()> {
 
     loop {
         match read_interactive_wallet_balance(config) {
-            Ok(Some(balance)) if balance < INTERACTIVE_REQUIRED_WALLET_BALANCE_NANOTONS => {
+            Ok(balance) if balance < INTERACTIVE_REQUIRED_WALLET_BALANCE_NANOTONS => {
                 print_wallet_balance_problem(
                     &config.cocoon_wallet_address,
                     balance,
@@ -2075,18 +2056,11 @@ fn wait_for_long_auth_funding(config: &RuntimeConfig) -> Result<()> {
                 );
                 wait_for_enter("Fund the wallet and press Enter: ")?;
             }
-            Ok(Some(balance)) => {
+            Ok(balance) => {
                 println!(
                     "{} Cocoon wallet balance: {} TON",
                     color_status("ok"),
                     format_nanotons(balance)
-                );
-                return Ok(());
-            }
-            Ok(None) => {
-                println!(
-                    "{} Balance check is disabled; continuing",
-                    color_status("warn")
                 );
                 return Ok(());
             }
@@ -2102,16 +2076,16 @@ fn wait_for_long_auth_funding(config: &RuntimeConfig) -> Result<()> {
     }
 }
 
-fn read_interactive_wallet_balance(config: &RuntimeConfig) -> Result<Option<u64>> {
-    if !config.ton.readonly_enabled {
-        return Ok(None);
-    }
+fn read_interactive_wallet_balance(config: &RuntimeConfig) -> Result<u64> {
     let client = TonReadonlyClient::connect(&config.ton)
         .context("connect TON liteclient to check Cocoon wallet balance")?;
     let snapshot = client
         .accounts_snapshot(&config.cocoon_wallet_address, None)
         .context("read Cocoon wallet balance")?;
-    Ok(snapshot.wallet.and_then(|wallet| wallet.balance))
+    snapshot
+        .wallet
+        .and_then(|wallet| wallet.balance)
+        .context("Cocoon wallet balance is unavailable")
 }
 
 fn wait_for_enter(prompt: &str) -> Result<()> {

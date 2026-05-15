@@ -57,7 +57,7 @@ pub struct RuntimeConfig {
     pub max_tokens: i32,
     /// Default Cocoon request timeout in seconds.
     pub request_timeout: f64,
-    /// TON liteclient read-only settings used by `/stats`.
+    /// TON liteclient settings used by stats, auth, maintenance, and CLI controls.
     pub ton: TonRuntimeConfig,
 }
 
@@ -65,11 +65,9 @@ pub struct RuntimeConfig {
 #[derive(Clone)]
 pub struct NodeWalletKey([u8; 32]);
 
-/// Validated read-only TON liteclient configuration.
+/// Validated TON liteclient configuration.
 #[derive(Debug, Clone)]
 pub struct TonRuntimeConfig {
-    /// Whether `rocoon` should read wallet/root state from TON liteservers.
-    pub readonly_enabled: bool,
     /// Selects mainnet, using rocoon's embedded mainnet config when no explicit config is set.
     pub mainnet: bool,
     /// Optional TON global config JSON path overriding the embedded/default config.
@@ -125,11 +123,10 @@ struct RequestConfig {
     timeout_secs: f64,
 }
 
-/// Read-only TON liteclient TOML section.
+/// TON liteclient TOML section.
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct TonConfig {
-    readonly_enabled: bool,
     mainnet: bool,
     config_path: Option<PathBuf>,
     root_contract_address: Option<String>,
@@ -219,7 +216,6 @@ impl RuntimeConfig {
             max_tokens: config.request.max_tokens,
             request_timeout: config.request.timeout_secs,
             ton: TonRuntimeConfig {
-                readonly_enabled: config.ton.readonly_enabled,
                 mainnet: config.ton.mainnet,
                 config_path: ton_config_path,
                 root_contract_address,
@@ -231,7 +227,8 @@ impl RuntimeConfig {
 
 impl NodeWalletKey {
     /// Returns the decoded Ed25519 seed for internal signing code.
-    pub(crate) const fn seed(&self) -> &[u8; 32] {
+    #[must_use]
+    pub const fn seed(&self) -> &[u8; 32] {
         &self.0
     }
 }
@@ -272,7 +269,6 @@ impl Default for RequestConfig {
 impl Default for TonConfig {
     fn default() -> Self {
         Self {
-            readonly_enabled: true,
             mainnet: true,
             config_path: None,
             root_contract_address: None,
@@ -325,10 +321,6 @@ fn apply_env_overrides(config: &mut FileConfig) -> Result<()> {
     apply_f64_env(
         "ROCOON_REQUEST_TIMEOUT_SECS",
         &mut config.request.timeout_secs,
-    )?;
-    apply_bool_env(
-        "ROCOON_TON_READONLY_ENABLED",
-        &mut config.ton.readonly_enabled,
     )?;
     apply_bool_env("ROCOON_TON_MAINNET", &mut config.ton.mainnet)?;
     apply_optional_path_env("ROCOON_TON_CONFIG_PATH", &mut config.ton.config_path)?;

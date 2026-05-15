@@ -2281,8 +2281,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "owo-colors",
  "rocoon-client",
+ "rocoon-config",
  "rocoon-openai-server",
 ]
 
@@ -2291,15 +2291,29 @@ name = "rocoon-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64",
  "ed25519-dalek",
  "rand 0.8.6",
+ "rocoon-config",
  "rocoon-contract",
  "rocoon-protocol",
  "rocoon-transport",
- "serde",
  "sha2",
  "tokio",
+ "ton",
+ "ton_core",
+]
+
+[[package]]
+name = "rocoon-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "clap",
+ "ed25519-dalek",
+ "owo-colors",
+ "rocoon-contract",
+ "serde",
  "toml",
  "ton",
  "ton_core",

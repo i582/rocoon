@@ -126,7 +126,7 @@ impl ServerStats {
             "status": {
                 "enabled": true,
                 "connected": true,
-                "ton_wallet_polling": client.ton_readonly_enabled,
+                "ton_wallet_polling": true,
                 "ton_wallet_polling_ok": client.ton_readonly_ok,
                 "root_contract_polling": false,
                 "ton_readonly_error": &client.ton_readonly_error
@@ -144,7 +144,6 @@ impl ServerStats {
             },
             "blockchain": {
                 "network": "ton",
-                "readonly_enabled": client.ton_readonly_enabled,
                 "masterchain_seqno": client.masterchain_seqno,
                 "root_contract_polling": false
             },
@@ -363,10 +362,10 @@ fn format_nanotons_u64_as_ton(value: u64) -> String {
 }
 
 const fn wallet_source(client: &ClientStatus) -> &'static str {
-    match (client.ton_readonly_enabled, client.ton_readonly_ok) {
-        (false, _) => "disabled_ton_wallet_polling",
-        (true, true) => "ton_liteclient",
-        (true, false) => "ton_liteclient_error",
+    if client.ton_readonly_ok {
+        "ton_liteclient"
+    } else {
+        "ton_liteclient_error"
     }
 }
 

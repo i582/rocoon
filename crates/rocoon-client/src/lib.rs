@@ -5,16 +5,14 @@
 //! transport details live in `rocoon-transport`.
 
 mod client;
-pub mod config;
 mod ton_readonly;
-mod wallet;
 
 pub use client::{
     AuthPaymentStatus, ClientContractClosedOrClosing, ClientStatus, CocoonClient,
     ControlRequestStatus, HttpExchange, ModelInfo, WalletTransferStatus, WorkerInfo,
     is_client_contract_closed_or_closing_error,
 };
-pub use config::RuntimeConfig;
+pub use rocoon_config::RuntimeConfig;
 pub use rocoon_transport::{QueryFinalInfo, TokenUsage};
 pub use ton_readonly::{
     COCOON_WALLET_RESERVE_NANOTONS, ClientContractSnapshot, TonAccountState, TonControlAction,
