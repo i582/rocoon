@@ -1,3 +1,11 @@
+//! Runtime configuration loading for `rocoon`.
+//!
+//! Configuration is intentionally split into two shapes:
+//! `FileConfig` mirrors the TOML file layout, while `RuntimeConfig` is the
+//! validated, flattened structure used by the rest of the program. Environment
+//! variables override TOML values so the same binary can be used from local
+//! runs, shells, and service managers without rewriting the config file.
+
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -12,20 +20,35 @@ const DEFAULT_PROXY_ADDR: &str = "91.108.4.11:8888";
 const DEFAULT_OWNER_ADDRESS: &str = "UQD5MEMHNCHR-zkATB3elGUvRfNiZAlK_luIj0matDI1xH_H";
 const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 5;
 
+/// Validated configuration used by networking, Cocoon auth, and the HTTP API.
+///
+/// This type is cloned into `CocoonClient` so the client can reconnect using
+/// the same settings after transient proxy/session failures.
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
+    /// Path that was actually used for TOML loading.
     pub config_path: PathBuf,
+    /// Cocoon proxy TCP address, for example `91.108.4.11:8888`.
     pub proxy_addr: String,
+    /// Maximum duration for opening the initial TCP connection.
     pub connect_timeout: Duration,
+    /// Local OpenAI-compatible HTTP listen address.
     pub listen_addr: String,
+    /// Cocoon client smart-contract address used in `client.connectToProxy`.
     pub owner_address: String,
+    /// Shared secret for short proxy authorization.
     pub client_secret: Option<String>,
+    /// Minimum accepted on-chain Cocoon config version.
     pub min_config_version: i32,
+    /// Upper bound for worker price coefficient selected by the proxy.
     pub max_coefficient: i32,
+    /// Default token cap for local requests that do not provide one.
     pub max_tokens: i32,
+    /// Default Cocoon request timeout in seconds.
     pub request_timeout: f64,
 }
 
+/// TOML root object before validation and environment overrides.
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct FileConfig {
@@ -35,6 +58,7 @@ struct FileConfig {
     request: RequestConfig,
 }
 
+/// Network-related TOML section.
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct NetworkConfig {
@@ -42,12 +66,14 @@ struct NetworkConfig {
     connect_timeout_secs: u64,
 }
 
+/// Local HTTP server TOML section.
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct ServerConfig {
     listen_addr: String,
 }
 
+/// Cocoon client identity and authorization TOML section.
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct ClientConfig {
@@ -56,6 +82,7 @@ struct ClientConfig {
     min_config_version: i32,
 }
 
+/// Per-request default limits used by the HTTP layer.
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct RequestConfig {
@@ -65,6 +92,11 @@ struct RequestConfig {
 }
 
 impl RuntimeConfig {
+    /// Loads configuration from `rocoon.toml` or `--config path`.
+    ///
+    /// Missing default config is allowed and falls back to built-in defaults.
+    /// Explicit `--config` paths must exist. Environment variables are applied
+    /// after TOML loading and before validation.
     pub fn load() -> Result<Self> {
         let (config_path, explicit_config_path) = config_path_from_args(env::args_os().skip(1))?;
         let mut config = read_config(&config_path, explicit_config_path)?;
@@ -165,6 +197,11 @@ impl Default for RequestConfig {
     }
 }
 
+/// Parses the minimal command-line interface.
+///
+/// The boolean in the result marks whether the config path was explicitly
+/// provided. That distinction lets default `rocoon.toml` be optional while
+/// still failing fast for mistyped explicit config paths.
 fn config_path_from_args<I>(mut args: I) -> Result<(PathBuf, bool)>
 where
     I: Iterator<Item = OsString>,
@@ -192,6 +229,7 @@ where
     }
 }
 
+/// Reads and deserializes the TOML file, or returns defaults when allowed.
 fn read_config(path: &Path, explicit: bool) -> Result<FileConfig> {
     match fs::read_to_string(path) {
         Ok(data) => toml::from_str(&data).with_context(|| format!("parse {}", path.display())),
@@ -202,6 +240,10 @@ fn read_config(path: &Path, explicit: bool) -> Result<FileConfig> {
     }
 }
 
+/// Performs semantic validation that TOML deserialization cannot express.
+///
+/// This keeps downstream code from repeatedly checking for empty addresses,
+/// non-positive timeouts, or negative request limits.
 fn validate(config: &FileConfig) -> Result<()> {
     if config.network.proxy_addr.trim().is_empty() {
         bail!("network.proxy_addr must not be empty");

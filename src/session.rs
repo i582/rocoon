@@ -1,3 +1,10 @@
+//! Cocoon TCP session framing.
+//!
+//! After PoW and RA-TLS, Cocoon uses a compact frame protocol with send/receive
+//! sequence numbers and TL packets inside each frame. This module owns that
+//! framing layer and provides two request styles: classic `tcp.query` for
+//! metadata/auth and raw `tcp.packet` streaming for `client.runQueryEx`.
+
 use std::io::{Read, Write};
 
 use anyhow::{Context, Result, anyhow};
@@ -9,18 +16,21 @@ use crate::cocoon::{self, RunQueryOptions};
 
 const MAX_FRAME_SIZE: u32 = 1 << 20;
 
+/// TL packet that opens a logical Cocoon TCP session.
 #[derive(TlWrite)]
 #[tl(boxed, id = 0xa57c4261)]
 struct TcpConnect {
     id: i64,
 }
 
+/// TL response confirming the logical session id.
 #[derive(Debug, TlRead)]
 #[tl(boxed, id = 0x636d41d6)]
 struct TcpConnectedPacket {
     id: i64,
 }
 
+/// TL wrapper for request/response-style proxy calls.
 #[derive(TlWrite)]
 #[tl(boxed, id = 0x3af51908)]
 struct TcpQuery<'a> {
@@ -28,18 +38,21 @@ struct TcpQuery<'a> {
     data: &'a [u8],
 }
 
+/// TL keepalive response.
 #[derive(TlWrite)]
 #[tl(boxed, id = 0x0bd4302c)]
 struct TcpPong {
     id: i64,
 }
 
+/// TL wrapper for streaming packets such as `client.runQueryEx`.
 #[derive(TlWrite)]
 #[tl(boxed, id = 0x9c17baf8)]
 struct TcpPacketOut<'a> {
     data: &'a [u8],
 }
 
+/// Incoming TL packet variants inside Cocoon session frames.
 #[derive(Debug, TlRead)]
 #[tl(boxed)]
 #[allow(dead_code)]
@@ -60,22 +73,32 @@ enum TcpPacket<'tl> {
     },
 }
 
+/// Stateful frame reader/writer over an already-secure transport.
+///
+/// `RW` is generic so the framing logic can be tested or reused with any
+/// `Read + Write` stream. In production it is `RatlsStream`.
 pub struct Session<RW> {
     io: RW,
     send_seqno: u32,
     recv_seqno: u32,
 }
 
+/// Result of the initial `tcp.connect` handshake.
 pub struct TcpConnected {
+    /// Random session id acknowledged by the proxy.
     pub id: i64,
 }
 
+/// Aggregated result of one `client.runQueryEx` call.
 pub struct RunQueryOutput {
+    /// First answer packet containing the encoded HTTP response head.
     pub response_head: Vec<u8>,
+    /// Additional body chunks from subsequent answer part packets.
     pub payload_parts: Vec<Vec<u8>>,
 }
 
 impl<RW: Read + Write> Session<RW> {
+    /// Starts a logical Cocoon session over the supplied transport.
     pub fn connect(io: RW) -> Result<(Self, TcpConnected)> {
         let mut session = Self {
             io,
@@ -105,6 +128,10 @@ impl<RW: Read + Write> Session<RW> {
         Ok((session, TcpConnected { id }))
     }
 
+    /// Sends a one-shot `tcp.query` and waits for its matching answer.
+    ///
+    /// This is used for metadata and authorization calls where the proxy returns
+    /// a single `tcp.queryAnswer` or `tcp.queryError`.
     pub fn make_request(&mut self, request_payload: &[u8]) -> Result<Vec<u8>> {
         let query_id = rand::thread_rng().gen_range(0..i64::MAX);
         let packet = tl_proto::serialize(TcpQuery {
@@ -137,6 +164,11 @@ impl<RW: Read + Write> Session<RW> {
         }
     }
 
+    /// Sends `client.runQueryEx` and aggregates its streamed answer packets.
+    ///
+    /// The first matching `Answer` packet contains the encoded HTTP response.
+    /// Later `Part` packets contain more response body bytes. The optional
+    /// `final_info` flag marks the terminal packet.
     pub fn run_client_query_ex(
         &mut self,
         model: &str,
@@ -226,6 +258,7 @@ impl<RW: Read + Write> Session<RW> {
         }
     }
 
+    /// Writes one length/seqno-prefixed Cocoon frame.
     fn send_frame(&mut self, payload: &[u8]) -> Result<()> {
         let len = u32::try_from(payload.len()).context("payload too large")?;
         let mut header = [0u8; 8];
@@ -241,6 +274,7 @@ impl<RW: Read + Write> Session<RW> {
         self.io.flush().context("flush frame")
     }
 
+    /// Reads one Cocoon frame and validates the receive sequence number.
     fn recv_frame(&mut self) -> Result<Vec<u8>> {
         let mut header = [0u8; 8];
         self.io

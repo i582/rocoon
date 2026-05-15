@@ -1,3 +1,11 @@
+//! RA-TLS transport setup.
+//!
+//! Cocoon proxies speak TLS with a TEE/RA-TLS-oriented certificate flow. This
+//! prototype creates an ephemeral Ed25519 client certificate and deliberately
+//! skips server certificate verification because full TEE quote validation is
+//! outside the current scope. The resulting `RatlsStream` is still encrypted and
+//! is used as the transport for Cocoon session frames.
+
 use std::fmt;
 use std::net::TcpStream;
 use std::sync::Arc;
@@ -10,12 +18,14 @@ use rustls::{
     ClientConfig, ClientConnection, DigitallySignedStruct, Error, SignatureScheme, StreamOwned,
 };
 
+/// TLS stream plus small metadata useful for startup logging.
 pub struct RatlsStream {
     inner: StreamOwned<ClientConnection, TcpStream>,
     server_cert_der_len: usize,
 }
 
 impl RatlsStream {
+    /// Returns the DER length of the first server certificate, or zero if none.
     pub fn server_cert_der_len(&self) -> usize {
         self.server_cert_der_len
     }
@@ -37,6 +47,7 @@ impl std::io::Write for RatlsStream {
     }
 }
 
+/// Opens the RA-TLS-like client connection over an already connected TCP stream.
 pub fn connect(stream: TcpStream) -> Result<RatlsStream> {
     let (cert, key) = generate_ephemeral_ed25519_cert()?;
 
@@ -71,6 +82,7 @@ pub fn connect(stream: TcpStream) -> Result<RatlsStream> {
     })
 }
 
+/// Generates the short-lived self-signed client certificate used for this run.
 fn generate_ephemeral_ed25519_cert() -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>)> {
     let key_pair = KeyPair::generate_for(&rcgen::PKCS_ED25519)
         .context("generate ephemeral Ed25519 key pair")?;
@@ -85,6 +97,7 @@ fn generate_ephemeral_ed25519_cert() -> Result<(CertificateDer<'static>, Private
     Ok((cert_der, key_der))
 }
 
+/// Placeholder verifier used until real RA-TLS quote verification is implemented.
 #[derive(Clone)]
 struct NoServerCertVerification;
 

@@ -1,3 +1,10 @@
+//! Local OpenAI-compatible HTTP server.
+//!
+//! The server is deliberately small and synchronous: it accepts localhost HTTP
+//! requests, translates the supported endpoints into `CocoonClient` calls, and
+//! writes OpenAI-compatible responses. A single Cocoon session is protected by
+//! a mutex so requests do not interleave bytes on the proxy connection.
+
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -12,19 +19,25 @@ use crate::client::{CocoonClient, HttpExchange};
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 
+/// Default per-request limits used when an HTTP request omits them.
 #[derive(Clone, Copy)]
 pub struct Defaults {
+    /// Default maximum accepted Cocoon worker price coefficient.
     pub max_coefficient: i32,
+    /// Default maximum token count.
     pub max_tokens: i32,
+    /// Default Cocoon request timeout in seconds.
     pub timeout: f64,
 }
 
+/// Minimal parsed HTTP request shape needed by this server.
 struct HttpRequest {
     method: String,
     path: String,
     body: Vec<u8>,
 }
 
+/// Sanitized completion request plus Cocoon-specific execution limits.
 struct CompletionRequest {
     model: String,
     body: Vec<u8>,
@@ -33,6 +46,11 @@ struct CompletionRequest {
     timeout: f64,
 }
 
+/// Serves the local OpenAI-compatible API forever.
+///
+/// Supported endpoints are `/health`, `/v1/models`, `/v1/chat/completions`,
+/// and `/v1/completions`. Each accepted TCP connection is handled on a separate
+/// thread while access to the underlying Cocoon client remains serialized.
 pub fn serve(listen_addr: &str, client: CocoonClient, defaults: Defaults) -> Result<()> {
     let listener = TcpListener::bind(listen_addr).with_context(|| format!("bind {listen_addr}"))?;
     println!("OpenAI-compatible HTTP server listening on http://{listen_addr}");
@@ -58,6 +76,10 @@ pub fn serve(listen_addr: &str, client: CocoonClient, defaults: Defaults) -> Res
     Ok(())
 }
 
+/// Handles one accepted HTTP connection.
+///
+/// Errors are represented as `HttpError` so the caller can still write a JSON
+/// error response if the socket is usable.
 fn handle_connection(
     mut stream: TcpStream,
     client: Arc<Mutex<CocoonClient>>,
@@ -134,6 +156,7 @@ fn handle_connection(
     }
 }
 
+/// HTTP error carrying enough context to respond on the original stream.
 struct HttpError {
     stream: Option<TcpStream>,
     status_code: i32,
@@ -141,6 +164,7 @@ struct HttpError {
 }
 
 impl HttpError {
+    /// Builds an error from an `anyhow::Error`.
     fn new(stream: Option<TcpStream>, status_code: i32, error: anyhow::Error) -> Self {
         Self {
             stream,
@@ -149,6 +173,7 @@ impl HttpError {
         }
     }
 
+    /// Builds an error from a static message.
     fn message(stream: Option<TcpStream>, status_code: i32, message: &str) -> Self {
         Self {
             stream,
@@ -164,6 +189,10 @@ impl std::fmt::Display for HttpError {
     }
 }
 
+/// Reads and parses one HTTP/1.x request from a stream.
+///
+/// This parser intentionally supports only what the local bridge needs:
+/// request line, headers, `Content-Length`, and a bounded body.
 fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
     let mut data = Vec::new();
     let header_end = loop {
@@ -231,6 +260,11 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
     Ok(HttpRequest { method, path, body })
 }
 
+/// Parses and sanitizes OpenAI completion JSON.
+///
+/// The model name is extracted for Cocoon routing. Cocoon-specific knobs
+/// (`max_coefficient`, `timeout`) are removed from the forwarded JSON body,
+/// while token limits are normalized for worker compatibility.
 fn parse_completion_request(body: &[u8], defaults: Defaults) -> Result<CompletionRequest> {
     let mut value: Value = serde_json::from_slice(body).context("parse OpenAI request JSON")?;
     let object = value
@@ -300,6 +334,7 @@ fn parse_completion_request(body: &[u8], defaults: Defaults) -> Result<Completio
     })
 }
 
+/// Writes a Cocoon worker HTTP response back to the local client.
 fn write_cocoon_http_response(stream: &mut TcpStream, response: HttpExchange) -> Result<()> {
     let headers = sanitized_response_headers(response.headers);
     write_response(
@@ -311,6 +346,7 @@ fn write_cocoon_http_response(stream: &mut TcpStream, response: HttpExchange) ->
     )
 }
 
+/// Writes a JSON response with a generated HTTP status line and length.
 fn write_json(
     stream: &mut TcpStream,
     status_code: i32,
@@ -329,6 +365,10 @@ fn write_json(
     )
 }
 
+/// Writes a complete HTTP/1.1 response.
+///
+/// Header names are normalized through a map so generated `Content-Length` and
+/// `Connection` values reliably override upstream values.
 fn write_response(
     stream: &mut TcpStream,
     status_code: i32,
@@ -356,6 +396,7 @@ fn write_response(
     stream.flush().context("flush response")
 }
 
+/// Removes hop-by-hop and Cocoon-internal response headers.
 fn sanitized_response_headers(headers: Vec<(String, String)>) -> Vec<(String, String)> {
     headers
         .into_iter()
@@ -368,10 +409,12 @@ fn sanitized_response_headers(headers: Vec<(String, String)>) -> Vec<(String, St
         .collect()
 }
 
+/// Finds the end of an HTTP header block.
 fn find_header_end(data: &[u8]) -> Option<usize> {
     data.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
+/// Returns a small reason phrase set for generated responses.
 fn reason_phrase(status_code: i32) -> &'static str {
     match status_code {
         200 => "OK",
@@ -385,6 +428,7 @@ fn reason_phrase(status_code: i32) -> &'static str {
     }
 }
 
+/// Converts a lowercase header name into conventional HTTP casing.
 fn canonical_header_name(name: &str) -> String {
     name.split('-')
         .map(|part| {
