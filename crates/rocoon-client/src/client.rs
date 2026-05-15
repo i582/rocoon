@@ -27,7 +27,7 @@ use rocoon_protocol::{self as cocoon, RunQueryOptions, WorkerInstanceV2, WorkerT
 use rocoon_transport::{QueryFinalInfo, RunQueryOutput, Session, pow, ratls};
 
 const CONTROL_RESEND_INTERVAL: Duration = Duration::from_secs(30);
-const AUTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+const AUTH_REQUEST_TIMEOUT: Duration = Duration::from_mins(5);
 const BALANCE_CHECK_MIN_SECS: f64 = 1.0;
 const BALANCE_CHECK_MAX_SECS: f64 = 2.0;
 const PAYMENT_COMPARE_MIN_SECS: f64 = 10.0;
