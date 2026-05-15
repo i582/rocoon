@@ -52,12 +52,12 @@ fn read_challenge<R: Read>(reader: &mut R) -> Result<Challenge> {
         .read_exact(&mut buf)
         .context("read 24-byte PoW challenge")?;
 
-    let magic = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+    let magic = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
     if magic != POW_SIMPLE_MAGIC {
         anyhow::bail!("unexpected PoW magic 0x{magic:08x}, expected 0x{POW_SIMPLE_MAGIC:08x}");
     }
 
-    let difficulty = i32::from_le_bytes(buf[4..8].try_into()?);
+    let difficulty = i32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
     if difficulty < 0 {
         anyhow::bail!("negative PoW difficulty {difficulty}");
     }

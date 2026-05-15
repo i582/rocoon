@@ -19,6 +19,12 @@ cargo = "deny"
 nursery = "deny"
 pedantic = "deny"
 
+unwrap_used = "deny"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+panic = "deny"
+
 [dependencies]
 anyhow = "1"
 rand = "0.8"

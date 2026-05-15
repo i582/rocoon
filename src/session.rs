@@ -208,13 +208,14 @@ impl<RW: Read + Write> Session<RW> {
                             if response_head.is_some() {
                                 anyhow::bail!("duplicate client.queryAnswerEx");
                             }
-                            response_head = Some(answer.to_vec());
+                            let answer = answer.to_vec();
                             if final_info.is_some() {
                                 return Ok(RunQueryOutput {
-                                    response_head: response_head.unwrap(),
+                                    response_head: answer,
                                     payload_parts,
                                 });
                             }
+                            response_head = Some(answer);
                         }
                         cocoon::QueryAnswerEx::Part {
                             request_id: got_id,
@@ -229,8 +230,10 @@ impl<RW: Read + Write> Session<RW> {
                             }
                             payload_parts.push(answer.to_vec());
                             if final_info.is_some() {
+                                let response_head =
+                                    response_head.context("missing client.queryAnswerEx")?;
                                 return Ok(RunQueryOutput {
-                                    response_head: response_head.unwrap(),
+                                    response_head,
                                     payload_parts,
                                 });
                             }
@@ -281,8 +284,8 @@ impl<RW: Read + Write> Session<RW> {
             .read_exact(&mut header)
             .context("read frame header")?;
 
-        let size = u32::from_le_bytes(header[0..4].try_into().unwrap());
-        let seqno = u32::from_le_bytes(header[4..8].try_into().unwrap());
+        let size = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+        let seqno = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
 
         if seqno != self.recv_seqno {
             anyhow::bail!(
