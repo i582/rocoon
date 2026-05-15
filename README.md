@@ -23,6 +23,8 @@ Current scope:
 Workspace layout:
 
 - `rocoon-protocol`: Cocoon TL objects, encoders, and decoders.
+- `rocoon-contract`: TLB-backed Rust types for Cocoon smart-contract storage
+  and message bodies.
 - `rocoon-transport`: reusable Cocoon proxy transport stack: TCP PoW, RA-TLS,
   `tcp.query`, `tcp.packet`, ping/pong, and `runQueryEx` answer aggregation.
 - `rocoon-client`: high-level Cocoon client API: proxy authorization, model

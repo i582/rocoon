@@ -16,6 +16,7 @@ base64.workspace = true
 ed25519-dalek.workspace = true
 rand.workspace = true
 rocoon-protocol = { workspace = true }
+rocoon-contract = { workspace = true }
 rocoon-transport = { workspace = true }
 serde.workspace = true
 sha2.workspace = true

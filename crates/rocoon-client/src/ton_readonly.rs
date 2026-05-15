@@ -13,10 +13,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use ed25519_dalek::{Signer, SigningKey};
 use rand::RngCore;
+use rocoon_contract::{
+    CocoonClientContractData, CocoonClientControlAction, CocoonClientControlBody, CocoonWalletData,
+    CocoonWalletUnsignedBody, cocoon_wallet_signed_body,
+};
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 use ton::block_tlb::{
     AccountState, CommonMsgInfo, CommonMsgInfoExtIn, CommonMsgInfoInt, CurrencyCollection,
-    MaybeAccount, Msg, StateInit,
+    MaybeAccount, Msg,
 };
 use ton::lite_client::{LiteClient, LiteReqParams};
 use ton::ton_core::cell::TonCell;
@@ -28,8 +32,6 @@ use ton::ton_core::types::tlb_core::{
 
 use crate::{config::TonRuntimeConfig, wallet};
 
-const OWNER_CLIENT_WITHDRAW: u32 = 0xda06_8e78;
-const OWNER_CLIENT_REQUEST_REFUND: u32 = 0xfafa_6cc1;
 pub const CONTROL_MESSAGE_VALUE_NANOTONS: u64 = 700_000_000;
 pub const COCOON_WALLET_RESERVE_NANOTONS: u64 = 100_000_000;
 const WALLET_FORWARD_MODE: u8 = 0;
@@ -507,27 +509,37 @@ impl TonWalletSnapshot {
 
 impl ClientContractSnapshot {
     fn from_account(account: &MaybeAccount) -> Result<Self> {
-        let state = account_state(account);
+        let account_status = account_state(account);
         let data = read_client_contract_data(account.get_data())?;
+        let balance = data
+            .as_ref()
+            .map(|data| data.balance.to_u64())
+            .transpose()
+            .context("convert client contract balance to u64")?;
+        let stake = data
+            .as_ref()
+            .map(|data| data.stake.to_u64())
+            .transpose()
+            .context("convert client contract stake to u64")?;
         Ok(Self {
             account_balance: account
                 .get_balance()
                 .map(ton::ton_core::types::tlb_core::TLBCoins::to_u64)
                 .transpose()
                 .context("convert client contract account balance to u64 nanotons")?,
-            account_state: state,
+            account_state: account_status,
             last_tx_lt: last_tx_lt(account),
             state_raw: data.as_ref().map(|data| data.state),
             state: data
                 .as_ref()
                 .map(|data| client_contract_state_name(data.state)),
-            balance: data.as_ref().map(|data| data.balance),
-            stake: data.as_ref().map(|data| data.stake),
+            balance,
+            stake,
             tokens_used: data.as_ref().map(|data| data.tokens_used),
             unlock_ts: data.as_ref().map(|data| data.unlock_ts),
-            withdrawable_balance: data
-                .as_ref()
-                .map(|data| data.balance.saturating_sub(data.stake)),
+            withdrawable_balance: balance
+                .zip(stake)
+                .map(|(balance, stake)| balance.saturating_sub(stake)),
         })
     }
 }
@@ -554,21 +566,15 @@ impl TonControlAction {
             Self::RequestRefund => "close",
         }
     }
-
-    const fn opcode(self) -> u32 {
-        match self {
-            Self::Withdraw => OWNER_CLIENT_WITHDRAW,
-            Self::RequestRefund => OWNER_CLIENT_REQUEST_REFUND,
-        }
-    }
 }
 
-struct ClientContractData {
-    state: u8,
-    balance: u64,
-    stake: u64,
-    tokens_used: u64,
-    unlock_ts: u32,
+impl From<TonControlAction> for CocoonClientControlAction {
+    fn from(action: TonControlAction) -> Self {
+        match action {
+            TonControlAction::Withdraw => Self::Withdraw,
+            TonControlAction::RequestRefund => Self::RequestRefund,
+        }
+    }
 }
 
 fn path_to_str(path: &Path) -> Result<&str> {
@@ -580,45 +586,17 @@ fn read_cocoon_wallet_seqno(data: Option<&TonCell>) -> Result<Option<u32>> {
     let Some(data) = data else {
         return Ok(None);
     };
-    let mut parser = data.parser();
-    let seqno = parser
-        .read_num::<u32>(32)
-        .context("read Cocoon wallet seqno from data cell")?;
-    Ok(Some(seqno))
+    let data = CocoonWalletData::from_cell(data).context("read Cocoon wallet data cell")?;
+    Ok(Some(data.seqno))
 }
 
-fn read_client_contract_data(data: Option<&TonCell>) -> Result<Option<ClientContractData>> {
+fn read_client_contract_data(data: Option<&TonCell>) -> Result<Option<CocoonClientContractData>> {
     let Some(data) = data else {
         return Ok(None);
     };
-    let mut parser = data.parser();
-    let contract_state = parser
-        .read_num::<u8>(2)
-        .context("read client contract state")?;
-    let balance = TLBCoins::read(&mut parser)
-        .context("read client contract balance")?
-        .to_u64()
-        .context("convert client contract balance to u64")?;
-    let stake = TLBCoins::read(&mut parser)
-        .context("read client contract stake")?
-        .to_u64()
-        .context("convert client contract stake to u64")?;
-    let tokens_used = parser
-        .read_num::<u64>(64)
-        .context("read client contract tokens_used")?;
-    let unlock_ts = parser
-        .read_num::<u32>(32)
-        .context("read client contract unlock_ts")?;
-    let _secret_hash = parser
-        .read_bits(256)
-        .context("read client contract secret_hash")?;
-    Ok(Some(ClientContractData {
-        state: contract_state,
-        balance,
-        stake,
-        tokens_used,
-        unlock_ts,
-    }))
+    CocoonClientContractData::from_cell(data)
+        .map(Some)
+        .context("read Cocoon client contract data cell")
 }
 
 const fn client_contract_state_name(state: u8) -> &'static str {
@@ -653,12 +631,8 @@ fn build_client_control_body(
     query_id: u64,
     wallet_address: &TonAddress,
 ) -> Result<TonCell> {
-    let mut builder = TonCell::builder();
-    builder.write_num(&action.opcode(), 32)?;
-    builder.write_num(&query_id, 64)?;
-    wallet_address.to_msg_address_int().write(&mut builder)?;
-    builder
-        .build()
+    CocoonClientControlBody::new(action.into(), query_id, wallet_address.clone())
+        .to_cell()
         .context("build client contract control body cell")
 }
 
@@ -697,19 +671,12 @@ fn build_wallet_external_message(
         build_wallet_unsigned_body(wallet_seqno, internal_msg_cell).context("build wallet body")?;
     let signing_key = SigningKey::from_bytes(wallet_seed);
     let signature = signing_key.sign(unsigned_body.hash()?.as_slice());
-
-    let mut signed_body_builder = TonCell::builder();
-    signed_body_builder.write_bits(signature.to_bytes(), 512)?;
-    signed_body_builder.write_cell(&unsigned_body)?;
-    let signed_body = signed_body_builder
-        .build()
+    let signature = signature.to_bytes();
+    let signed_body = cocoon_wallet_signed_body(&signature, &unsigned_body)
         .context("build signed wallet body")?;
     let init = if wallet_seqno == 0 {
         Some(TLBEitherRef::new_with_layout(
-            StateInit::new(
-                wallet::cocoon_wallet_code()?,
-                wallet::cocoon_wallet_init_data_from_seed(wallet_owner_address, wallet_seed)?,
-            ),
+            wallet::cocoon_wallet_state_init_from_seed(wallet_owner_address, wallet_seed)?,
             EitherRefLayout::ToRef,
         ))
     } else {
@@ -729,13 +696,15 @@ fn build_wallet_external_message(
 }
 
 fn build_wallet_unsigned_body(wallet_seqno: u32, internal_msg_cell: TonCell) -> Result<TonCell> {
-    let mut builder = TonCell::builder();
-    builder.write_num(&0u32, 32)?;
-    builder.write_num(&valid_until()?, 32)?;
-    builder.write_num(&wallet_seqno, 32)?;
-    builder.write_num(&WALLET_FORWARD_MODE, 8)?;
-    builder.write_ref(internal_msg_cell)?;
-    builder.build().context("build unsigned wallet body")
+    CocoonWalletUnsignedBody {
+        subwallet_id: 0,
+        valid_until: valid_until()?,
+        seqno: wallet_seqno,
+        send_mode: WALLET_FORWARD_MODE,
+        internal_message: internal_msg_cell.into(),
+    }
+    .to_cell()
+    .context("build unsigned wallet body")
 }
 
 fn random_query_id() -> u64 {
@@ -753,37 +722,12 @@ fn valid_until() -> Result<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        OWNER_CLIENT_WITHDRAW, TonControlAction, build_client_control_body,
-        build_wallet_external_message, read_cocoon_wallet_seqno,
-    };
+    use super::build_wallet_external_message;
     use std::str::FromStr;
     use ton::block_tlb::Msg;
     use ton::ton_core::cell::TonCell;
     use ton::ton_core::traits::tlb::TLB;
     use ton::ton_core::types::TonAddress;
-
-    #[test]
-    fn cocoon_wallet_seqno_is_first_u32_in_data_cell() -> anyhow::Result<()> {
-        let mut builder = TonCell::builder();
-        builder.write_num(&7_u32, 32)?;
-        builder.write_num(&99_u32, 32)?;
-        let cell = builder.build()?;
-
-        assert_eq!(read_cocoon_wallet_seqno(Some(&cell))?, Some(7));
-        Ok(())
-    }
-
-    #[test]
-    fn client_control_body_starts_with_opcode_and_query_id() -> anyhow::Result<()> {
-        let wallet = TonAddress::from_str("UQA9iqwh-HWRz20_M4h5idcVcVesVHL6KVeaaJdCU5Ydq2Bi")?;
-        let cell = build_client_control_body(TonControlAction::Withdraw, 42, &wallet)?;
-        let mut parser = cell.parser();
-
-        assert_eq!(parser.read_num::<u32>(32)?, OWNER_CLIENT_WITHDRAW);
-        assert_eq!(parser.read_num::<u64>(64)?, 42);
-        Ok(())
-    }
 
     #[test]
     fn wallet_external_message_adds_state_init_for_seqno_zero() -> anyhow::Result<()> {
