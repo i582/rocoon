@@ -1,0 +1,137 @@
+use std::fmt;
+use std::net::TcpStream;
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use rcgen::{CertificateParams, KeyPair};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
+use rustls::{
+    ClientConfig, ClientConnection, DigitallySignedStruct, Error, SignatureScheme, StreamOwned,
+};
+
+pub struct RatlsStream {
+    inner: StreamOwned<ClientConnection, TcpStream>,
+    server_cert_der_len: usize,
+}
+
+impl RatlsStream {
+    pub fn server_cert_der_len(&self) -> usize {
+        self.server_cert_der_len
+    }
+}
+
+impl std::io::Read for RatlsStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl std::io::Write for RatlsStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+pub fn connect(stream: TcpStream) -> Result<RatlsStream> {
+    let (cert, key) = generate_ephemeral_ed25519_cert()?;
+
+    let mut config = ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(NoServerCertVerification))
+        .with_client_auth_cert(vec![cert], key)
+        .context("build rustls client config with client cert")?;
+    config.enable_sni = false;
+
+    let server_name = ServerName::try_from("cocoon.local").context("build server name")?;
+    let conn = ClientConnection::new(Arc::new(config), server_name).context("create TLS client")?;
+    let mut inner = StreamOwned::new(conn, stream);
+
+    while inner.conn.is_handshaking() {
+        inner
+            .conn
+            .complete_io(&mut inner.sock)
+            .context("complete TLS handshake")?;
+    }
+
+    let server_cert_der_len = inner
+        .conn
+        .peer_certificates()
+        .and_then(|certs| certs.first())
+        .map(|cert| cert.len())
+        .unwrap_or(0);
+
+    Ok(RatlsStream {
+        inner,
+        server_cert_der_len,
+    })
+}
+
+fn generate_ephemeral_ed25519_cert() -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>)> {
+    let key_pair = KeyPair::generate_for(&rcgen::PKCS_ED25519)
+        .context("generate ephemeral Ed25519 key pair")?;
+    let params = CertificateParams::new(vec!["rocoon.local".to_string()])
+        .context("build self-signed cert params")?;
+    let cert = params
+        .self_signed(&key_pair)
+        .context("create self-signed client cert")?;
+
+    let cert_der = CertificateDer::from(cert.der().to_vec());
+    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
+    Ok((cert_der, key_der))
+}
+
+#[derive(Clone)]
+struct NoServerCertVerification;
+
+impl fmt::Debug for NoServerCertVerification {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("NoServerCertVerification")
+    }
+}
+
+impl ServerCertVerifier for NoServerCertVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![
+            SignatureScheme::ED25519,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+        ]
+    }
+}

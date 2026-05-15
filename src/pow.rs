@@ -1,0 +1,81 @@
+use std::io::{Read, Write};
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, anyhow};
+use sha2::{Digest, Sha256};
+
+const POW_SIMPLE_MAGIC: u32 = 0x418e_1291;
+const POW_SIMPLE_RESPONSE_MAGIC: u32 = 0x0182_7319;
+
+pub struct PowStats {
+    pub difficulty: i32,
+    pub nonce: u64,
+    pub elapsed: Duration,
+}
+
+struct Challenge {
+    difficulty: i32,
+    salt: [u8; 16],
+}
+
+pub fn handshake<RW: Read + Write>(io: &mut RW) -> Result<PowStats> {
+    let challenge = read_challenge(io)?;
+    let start = Instant::now();
+    let nonce = solve(&challenge);
+    let elapsed = start.elapsed();
+    send_response(io, nonce)?;
+
+    Ok(PowStats {
+        difficulty: challenge.difficulty,
+        nonce,
+        elapsed,
+    })
+}
+
+fn read_challenge<R: Read>(reader: &mut R) -> Result<Challenge> {
+    let mut buf = [0u8; 24];
+    reader
+        .read_exact(&mut buf)
+        .context("read 24-byte PoW challenge")?;
+
+    let magic = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+    if magic != POW_SIMPLE_MAGIC {
+        return Err(anyhow!(
+            "unexpected PoW magic 0x{magic:08x}, expected 0x{POW_SIMPLE_MAGIC:08x}"
+        ));
+    }
+
+    let difficulty = u32::from_le_bytes(buf[4..8].try_into().unwrap()) as i32;
+    let mut salt = [0u8; 16];
+    salt.copy_from_slice(&buf[8..24]);
+
+    Ok(Challenge { difficulty, salt })
+}
+
+fn send_response<W: Write>(writer: &mut W, nonce: u64) -> Result<()> {
+    let mut buf = [0u8; 12];
+    buf[0..4].copy_from_slice(&POW_SIMPLE_RESPONSE_MAGIC.to_le_bytes());
+    buf[4..12].copy_from_slice(&nonce.to_le_bytes());
+    writer.write_all(&buf).context("send PoW response")
+}
+
+fn solve(challenge: &Challenge) -> u64 {
+    let mut data = [0u8; 24];
+    data[0..16].copy_from_slice(&challenge.salt);
+
+    let mut nonce = 0u64;
+    loop {
+        data[16..24].copy_from_slice(&nonce.to_le_bytes());
+        let hash = Sha256::digest(data);
+        if leading_zero_bits(&hash[..]) >= challenge.difficulty as u32 {
+            return nonce;
+        }
+        nonce += 1;
+    }
+}
+
+fn leading_zero_bits(hash: &[u8]) -> u32 {
+    let mut first = [0u8; 8];
+    first.copy_from_slice(&hash[..8]);
+    u64::from_le_bytes(first).leading_zeros()
+}
