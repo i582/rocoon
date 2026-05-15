@@ -13,6 +13,6 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 rocoon-client = { workspace = true }
-rocoon-openai-types = { workspace = true }
+rocoon-openai = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true

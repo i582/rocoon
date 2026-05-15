@@ -1,5 +1,5 @@
 [package]
-name = "rocoon-openai-types"
+name = "rocoon-openai"
 version.workspace = true
 edition.workspace = true
 description = "OpenAI-compatible request and response types for rocoon."

@@ -17,8 +17,8 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use rocoon_client::{CocoonClient, HttpExchange};
-use rocoon_openai_types::errors as openai_errors;
-use rocoon_openai_types::models::{self as openai_models, Model};
+use rocoon_openai::errors as openai_errors;
+use rocoon_openai::models::{self as openai_models, Model};
 
 mod stats;
 use stats::{CompletionFailure, CompletionSuccess, ServerStats};

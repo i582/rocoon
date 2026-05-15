@@ -3,7 +3,7 @@ members = [
     "crates/rocoon-config",
     "crates/rocoon-client",
     "crates/rocoon-server",
-    "crates/rocoon-openai-types",
+    "crates/rocoon-openai",
     "crates/rocoon-protocol",
     "crates/rocoon-contract",
     "crates/rocoon-transport",
@@ -40,7 +40,7 @@ panic = "deny"
 [workspace.dependencies]
 rocoon-client = { path = "crates/rocoon-client" }
 rocoon-config = { path = "crates/rocoon-config" }
-rocoon-openai-types = { path = "crates/rocoon-openai-types" }
+rocoon-openai = { path = "crates/rocoon-openai" }
 rocoon-protocol = { path = "crates/rocoon-protocol" }
 rocoon-contract = { path = "crates/rocoon-contract" }
 rocoon-server = { path = "crates/rocoon-server" }
