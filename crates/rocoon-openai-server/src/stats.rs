@@ -7,7 +7,8 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rocoon_client::{ClientStatus, HttpExchange, QueryFinalInfo, TokenUsage};
-use serde_json::{Value, json};
+use serde::Serialize;
+use serde_json::Value;
 
 const NANOTONS_PER_TON: u64 = 1_000_000_000;
 
@@ -119,70 +120,175 @@ impl ServerStats {
         });
     }
 
-    /// Builds the JSON body for `/stats`, `/jsonstats`, and `/v1/stats`.
-    pub fn to_json(&self, client: &ClientStatus) -> Value {
-        json!({
-            "object": "rocoon.stats",
-            "status": {
-                "enabled": true,
-                "connected": true,
-                "ton_wallet_polling_ok": client.ton_readonly_ok,
-                "ton_readonly_error": &client.ton_readonly_error
+    /// Builds the response body for `/stats`, `/jsonstats`, and `/v1/stats`.
+    pub fn to_response(&self, client: &ClientStatus) -> StatsResponse {
+        StatsResponse {
+            object: "rocoon.stats",
+            status: StatusResponse {
+                ton_wallet_polling_ok: client.ton_readonly_ok,
+                ton_readonly_error: client.ton_readonly_error.clone(),
             },
-            "client": {
-                "proxy_addr": &client.proxy_addr,
-                "owner_address": &client.owner_address,
-                "cocoon_wallet_address": &client.cocoon_wallet_address,
-                "root_contract_address": &client.root_contract_address,
-                "proto_version": client.proto_version,
-                "active_proxy_connections": client.active_proxy_connections,
-                "proxy_owner_address": &client.proxy_owner_address,
-                "proxy_sc_address": &client.proxy_sc_address,
-                "client_sc_address": &client.client_sc_address
+            client: ClientResponse {
+                proxy_addr: client.proxy_addr.clone(),
+                owner_address: client.owner_address.clone(),
+                cocoon_wallet_address: client.cocoon_wallet_address.clone(),
+                root_contract_address: client.root_contract_address.clone(),
+                proto_version: client.proto_version,
+                active_proxy_connections: client.active_proxy_connections,
+                proxy_owner_address: client.proxy_owner_address.clone(),
+                proxy_sc_address: client.proxy_sc_address.clone(),
+                client_sc_address: client.client_sc_address.clone(),
             },
-            "blockchain": {
-                "network": "ton",
-                "masterchain_seqno": client.masterchain_seqno
+            blockchain: BlockchainResponse {
+                network: "ton",
+                masterchain_seqno: client.masterchain_seqno,
             },
-            "client_contract": client_contract_json(client),
-            "wallet": {
-                "address": &client.cocoon_wallet_address,
-                "balance": client.wallet_balance,
-                "balance_ton": client.wallet_balance.map(format_nanotons_u64_as_ton),
-                "seqno": client.wallet_seqno,
-                "state": &client.wallet_state,
-                "last_tx_lt": client.wallet_last_tx_lt,
-                "source": wallet_source(client)
+            client_contract: client_contract_response(client),
+            wallet: WalletResponse {
+                address: client.cocoon_wallet_address.clone(),
+                balance: client.wallet_balance,
+                balance_ton: client.wallet_balance.map(format_nanotons_u64_as_ton),
+                seqno: client.wallet_seqno,
+                state: client.wallet_state.clone(),
+                last_tx_lt: client.wallet_last_tx_lt,
             },
-            "payment": {
-                "signed_payment_available": client.payment_status.signed_payment_available,
-                "tokens_committed_to_db": client.payment_status.tokens_committed_to_db,
-                "max_tokens": client.payment_status.max_tokens
+            payment: PaymentResponse {
+                signed_payment_available: client.payment_status.signed_payment_available,
+                tokens_committed_to_db: client.payment_status.tokens_committed_to_db,
+                max_tokens: client.payment_status.max_tokens,
             },
-            "requests": {
-                "completion_started": self.completion_requests_started,
-                "completion_success": self.completion_requests_succeeded,
-                "completion_failed": self.completion_requests_failed,
-                "completion_in_flight": self.completion_requests_in_flight,
-                "bytes_received": self.request_bytes_received,
-                "bytes_sent": self.response_bytes_sent,
-                "total_time_ms": self.total_request_duration_ms
+            requests: RequestsResponse {
+                completion_started: self.completion_requests_started,
+                completion_success: self.completion_requests_succeeded,
+                completion_failed: self.completion_requests_failed,
+                completion_in_flight: self.completion_requests_in_flight,
+                bytes_received: self.request_bytes_received,
+                bytes_sent: self.response_bytes_sent,
+                total_time_ms: self.total_request_duration_ms,
             },
-            "usage": {
-                "cocoon_final_info_tokens": token_usage_json(self.cocoon_tokens_used),
-                "openai_response_usage": openai_usage_json(self.openai_usage),
-                "cost": {
-                    "total_cost": self.openai_usage.total_cost,
-                    "total_cost_ton_estimate": format_nanotons_as_ton(self.openai_usage.total_cost),
-                    "note": "total_cost is forwarded from worker response usage; TON charges are not independently verified yet"
-                }
+            usage: UsageResponse {
+                cocoon_final_info_tokens: TokenUsageResponse::from(self.cocoon_tokens_used),
+                openai_response_usage: OpenAiUsageResponse::from(self.openai_usage),
+                cost: CostResponse {
+                    total_cost: self.openai_usage.total_cost,
+                    total_cost_ton_estimate: format_nanotons_as_ton(self.openai_usage.total_cost),
+                    note: "total_cost is forwarded from worker response usage; TON charges are not independently verified yet",
+                },
             },
-            "debug": {
-                "last_error": &self.last_error
+            debug: DebugResponse {
+                last_error: self.last_error.clone(),
             },
-            "last_request": self.last_request.as_ref().map_or(Value::Null, LastRequestStats::to_json)
-        })
+            last_request: self.last_request.as_ref().map(LastRequestResponse::from),
+        }
     }
+}
+
+/// Serialized `/stats` response.
+#[derive(Serialize)]
+pub struct StatsResponse {
+    object: &'static str,
+    status: StatusResponse,
+    client: ClientResponse,
+    blockchain: BlockchainResponse,
+    client_contract: Option<ClientContractResponse>,
+    wallet: WalletResponse,
+    payment: PaymentResponse,
+    requests: RequestsResponse,
+    usage: UsageResponse,
+    debug: DebugResponse,
+    last_request: Option<LastRequestResponse>,
+}
+
+#[derive(Serialize)]
+struct StatusResponse {
+    ton_wallet_polling_ok: bool,
+    ton_readonly_error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ClientResponse {
+    proxy_addr: String,
+    owner_address: String,
+    cocoon_wallet_address: String,
+    root_contract_address: Option<String>,
+    proto_version: i32,
+    active_proxy_connections: usize,
+    proxy_owner_address: String,
+    proxy_sc_address: String,
+    client_sc_address: String,
+}
+
+#[derive(Serialize)]
+struct BlockchainResponse {
+    network: &'static str,
+    masterchain_seqno: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct ClientContractResponse {
+    address: String,
+    account_state: &'static str,
+    account_balance: Option<u64>,
+    account_balance_ton: Option<String>,
+    last_tx_lt: Option<u64>,
+    state: Option<&'static str>,
+    state_raw: Option<u8>,
+    balance: Option<u64>,
+    balance_ton: Option<String>,
+    stake: Option<u64>,
+    stake_ton: Option<String>,
+    tokens_used: Option<u64>,
+    unlock_ts: Option<u32>,
+    withdrawable_balance: Option<u64>,
+    withdrawable_balance_ton: Option<String>,
+    client_top_up_running: bool,
+}
+
+#[derive(Serialize)]
+struct WalletResponse {
+    address: String,
+    balance: Option<u64>,
+    balance_ton: Option<String>,
+    seqno: Option<u32>,
+    state: Option<String>,
+    last_tx_lt: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct PaymentResponse {
+    signed_payment_available: bool,
+    tokens_committed_to_db: i64,
+    max_tokens: i64,
+}
+
+#[derive(Serialize)]
+struct RequestsResponse {
+    completion_started: u64,
+    completion_success: u64,
+    completion_failed: u64,
+    completion_in_flight: u64,
+    bytes_received: u64,
+    bytes_sent: u64,
+    total_time_ms: u64,
+}
+
+#[derive(Serialize)]
+struct UsageResponse {
+    cocoon_final_info_tokens: TokenUsageResponse,
+    openai_response_usage: OpenAiUsageResponse,
+    cost: CostResponse,
+}
+
+#[derive(Serialize)]
+struct CostResponse {
+    total_cost: i64,
+    total_cost_ton_estimate: String,
+    note: &'static str,
+}
+
+#[derive(Serialize)]
+struct DebugResponse {
+    last_error: Option<String>,
 }
 
 /// Last completed completion request.
@@ -202,21 +308,41 @@ struct LastRequestStats {
 }
 
 impl LastRequestStats {
-    /// Converts the request snapshot into JSON.
-    fn to_json(&self) -> Value {
-        json!({
-            "completed_at_unix": self.completed_at_unix,
-            "model": &self.model,
-            "path": &self.path,
-            "success": self.success,
-            "status_code": self.status_code,
-            "error": &self.error,
-            "request_bytes": self.request_bytes,
-            "response_bytes": self.response_bytes,
-            "duration_ms": self.duration_ms,
-            "openai_usage": self.openai_usage.map_or(Value::Null, openai_usage_json),
-            "final_info": self.final_info.as_ref().map_or(Value::Null, final_info_json)
-        })
+    fn as_response(&self) -> LastRequestResponse {
+        LastRequestResponse {
+            completed_at_unix: self.completed_at_unix,
+            model: self.model.clone(),
+            path: self.path.clone(),
+            success: self.success,
+            status_code: self.status_code,
+            error: self.error.clone(),
+            request_bytes: self.request_bytes,
+            response_bytes: self.response_bytes,
+            duration_ms: self.duration_ms,
+            openai_usage: self.openai_usage.map(OpenAiUsageResponse::from),
+            final_info: self.final_info.as_ref().map(FinalInfoResponse::from),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct LastRequestResponse {
+    completed_at_unix: u64,
+    model: String,
+    path: String,
+    success: bool,
+    status_code: Option<i32>,
+    error: Option<String>,
+    request_bytes: u64,
+    response_bytes: u64,
+    duration_ms: u64,
+    openai_usage: Option<OpenAiUsageResponse>,
+    final_info: Option<FinalInfoResponse>,
+}
+
+impl From<&LastRequestStats> for LastRequestResponse {
+    fn from(value: &LastRequestStats) -> Self {
+        value.as_response()
     }
 }
 
@@ -299,43 +425,83 @@ const fn add_token_usage(total: &mut TokenUsage, value: TokenUsage) {
         .saturating_add(value.total_tokens_used);
 }
 
-/// Converts Cocoon final token counters into JSON.
-fn token_usage_json(usage: TokenUsage) -> Value {
-    json!({
-        "prompt_tokens_used": usage.prompt_tokens_used,
-        "cached_tokens_used": usage.cached_tokens_used,
-        "completion_tokens_used": usage.completion_tokens_used,
-        "reasoning_tokens_used": usage.reasoning_tokens_used,
-        "total_tokens_used": usage.total_tokens_used
-    })
+/// Serialized Cocoon token counters.
+#[derive(Serialize)]
+#[allow(clippy::struct_field_names)]
+struct TokenUsageResponse {
+    prompt_tokens_used: i64,
+    cached_tokens_used: i64,
+    completion_tokens_used: i64,
+    reasoning_tokens_used: i64,
+    total_tokens_used: i64,
 }
 
-/// Converts OpenAI-compatible usage counters into JSON.
-fn openai_usage_json(usage: OpenAiUsage) -> Value {
-    json!({
-        "prompt_tokens": usage.prompt_tokens,
-        "cached_tokens": usage.cached_tokens,
-        "completion_tokens": usage.completion_tokens,
-        "reasoning_tokens": usage.reasoning_tokens,
-        "total_tokens": usage.total_tokens,
-        "prompt_total_cost": usage.prompt_total_cost,
-        "completion_total_cost": usage.completion_total_cost,
-        "total_cost": usage.total_cost,
-        "total_cost_ton_estimate": format_nanotons_as_ton(usage.total_cost)
-    })
+impl From<TokenUsage> for TokenUsageResponse {
+    fn from(value: TokenUsage) -> Self {
+        Self {
+            prompt_tokens_used: value.prompt_tokens_used,
+            cached_tokens_used: value.cached_tokens_used,
+            completion_tokens_used: value.completion_tokens_used,
+            reasoning_tokens_used: value.reasoning_tokens_used,
+            total_tokens_used: value.total_tokens_used,
+        }
+    }
 }
 
-/// Converts terminal Cocoon query metadata into JSON.
-fn final_info_json(info: &QueryFinalInfo) -> Value {
-    json!({
-        "tokens_used": token_usage_json(info.tokens_used),
-        "worker_debug": info.worker_debug.as_deref(),
-        "proxy_debug": info.proxy_debug.as_deref(),
-        "proxy_start_time": info.proxy_start_time,
-        "proxy_end_time": info.proxy_end_time,
-        "worker_start_time": info.worker_start_time,
-        "worker_end_time": info.worker_end_time
-    })
+/// Serialized OpenAI-compatible usage counters.
+#[derive(Serialize)]
+struct OpenAiUsageResponse {
+    prompt_tokens: i64,
+    cached_tokens: i64,
+    completion_tokens: i64,
+    reasoning_tokens: i64,
+    total_tokens: i64,
+    prompt_total_cost: i64,
+    completion_total_cost: i64,
+    total_cost: i64,
+    total_cost_ton_estimate: String,
+}
+
+impl From<OpenAiUsage> for OpenAiUsageResponse {
+    fn from(value: OpenAiUsage) -> Self {
+        Self {
+            prompt_tokens: value.prompt_tokens,
+            cached_tokens: value.cached_tokens,
+            completion_tokens: value.completion_tokens,
+            reasoning_tokens: value.reasoning_tokens,
+            total_tokens: value.total_tokens,
+            prompt_total_cost: value.prompt_total_cost,
+            completion_total_cost: value.completion_total_cost,
+            total_cost: value.total_cost,
+            total_cost_ton_estimate: format_nanotons_as_ton(value.total_cost),
+        }
+    }
+}
+
+/// Serialized terminal Cocoon query metadata.
+#[derive(Serialize)]
+struct FinalInfoResponse {
+    tokens_used: TokenUsageResponse,
+    worker_debug: Option<String>,
+    proxy_debug: Option<String>,
+    proxy_start_time: Option<f64>,
+    proxy_end_time: Option<f64>,
+    worker_start_time: Option<f64>,
+    worker_end_time: Option<f64>,
+}
+
+impl From<&QueryFinalInfo> for FinalInfoResponse {
+    fn from(value: &QueryFinalInfo) -> Self {
+        Self {
+            tokens_used: TokenUsageResponse::from(value.tokens_used),
+            worker_debug: value.worker_debug.clone(),
+            proxy_debug: value.proxy_debug.clone(),
+            proxy_start_time: value.proxy_start_time,
+            proxy_end_time: value.proxy_end_time,
+            worker_start_time: value.worker_start_time,
+            worker_end_time: value.worker_end_time,
+        }
+    }
 }
 
 /// Formats a nanoton amount as a fixed 9-decimal TON string.
@@ -353,35 +519,27 @@ fn format_nanotons_u64_as_ton(value: u64) -> String {
     format!("{whole}.{frac:09}")
 }
 
-const fn wallet_source(client: &ClientStatus) -> &'static str {
-    if client.ton_readonly_ok {
-        "ton_liteclient"
-    } else {
-        "ton_liteclient_error"
-    }
-}
-
-fn client_contract_json(client: &ClientStatus) -> Value {
-    let Some(contract) = &client.client_contract else {
-        return Value::Null;
-    };
-    json!({
-        "address": &client.client_sc_address,
-        "account_state": contract.account_state.as_str(),
-        "account_balance": contract.account_balance,
-        "account_balance_ton": contract.account_balance.map(format_nanotons_u64_as_ton),
-        "last_tx_lt": contract.last_tx_lt,
-        "state": contract.state,
-        "state_raw": contract.state_raw,
-        "balance": contract.balance,
-        "balance_ton": contract.balance.map(format_nanotons_u64_as_ton),
-        "stake": contract.stake,
-        "stake_ton": contract.stake.map(format_nanotons_u64_as_ton),
-        "tokens_used": contract.tokens_used,
-        "unlock_ts": contract.unlock_ts,
-        "withdrawable_balance": contract.withdrawable_balance,
-        "withdrawable_balance_ton": contract.withdrawable_balance.map(format_nanotons_u64_as_ton),
-        "sc_request_running": client.sc_request_running
+fn client_contract_response(client: &ClientStatus) -> Option<ClientContractResponse> {
+    let contract = client.client_contract.as_ref()?;
+    Some(ClientContractResponse {
+        address: client.client_sc_address.clone(),
+        account_state: contract.account_state.as_str(),
+        account_balance: contract.account_balance,
+        account_balance_ton: contract.account_balance.map(format_nanotons_u64_as_ton),
+        last_tx_lt: contract.last_tx_lt,
+        state: contract.state,
+        state_raw: contract.state_raw,
+        balance: contract.balance,
+        balance_ton: contract.balance.map(format_nanotons_u64_as_ton),
+        stake: contract.stake,
+        stake_ton: contract.stake.map(format_nanotons_u64_as_ton),
+        tokens_used: contract.tokens_used,
+        unlock_ts: contract.unlock_ts,
+        withdrawable_balance: contract.withdrawable_balance,
+        withdrawable_balance_ton: contract
+            .withdrawable_balance
+            .map(format_nanotons_u64_as_ton),
+        client_top_up_running: client.client_top_up_running,
     })
 }
 

@@ -13,7 +13,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use serde_json::{Map, Value, json};
+use serde::Serialize;
+use serde_json::{Map, Value};
 
 use rocoon_client::{CocoonClient, HttpExchange};
 use rocoon_openai_types::errors as openai_errors;
@@ -57,6 +58,12 @@ struct CompletionRequest {
     max_coefficient: i32,
     max_tokens: i32,
     timeout: f64,
+}
+
+/// Local health-check response.
+#[derive(Serialize)]
+struct HealthResponse {
+    status: &'static str,
 }
 
 /// Serves the local OpenAI-compatible API forever.
@@ -125,8 +132,13 @@ fn handle_connection(
     let (path, _) = split_path_query(&request.path);
 
     match (request.method.as_str(), path) {
-        ("GET", "/health") => write_json(&mut stream, 200, &json!({"status": "ok"}), Vec::new())
-            .map_err(|error| HttpError::new(None, 500, &error)),
+        ("GET", "/health") => write_json(
+            &mut stream,
+            200,
+            &HealthResponse { status: "ok" },
+            Vec::new(),
+        )
+        .map_err(|error| HttpError::new(None, 500, &error)),
         ("GET", "/stats" | "/jsonstats" | "/v1/stats") => handle_stats(&mut stream, state),
         ("GET", "/v1/models") => handle_models(&mut stream, state),
         ("POST", "/v1/chat/completions" | "/v1/completions") => {
@@ -151,12 +163,13 @@ fn handle_stats(stream: &mut TcpStream, state: &ServerState) -> std::result::Res
             HttpError::message(stream.try_clone().ok(), 500, "Cocoon client mutex poisoned")
         })?
         .status();
-    let stats_json = state
-        .stats
-        .lock()
-        .map_err(|_| HttpError::message(stream.try_clone().ok(), 500, "stats mutex poisoned"))?
-        .to_json(&client_status);
-    write_json(stream, 200, &stats_json, Vec::new())
+    let stats_response = {
+        let server_stats = state.stats.lock().map_err(|_| {
+            HttpError::message(stream.try_clone().ok(), 500, "stats mutex poisoned")
+        })?;
+        server_stats.to_response(&client_status)
+    };
+    write_json(stream, 200, &stats_response, Vec::new())
         .map_err(|error| HttpError::new(None, 500, &error))
 }
 

@@ -149,8 +149,8 @@ pub struct ClientStatus {
     pub wallet_state: Option<String>,
     /// Last transaction logical time for the Cocoon wallet account.
     pub wallet_last_tx_lt: Option<u64>,
-    /// Whether a client-contract smart-contract request is still running.
-    pub sc_request_running: bool,
+    /// Whether a client-contract top-up request is still waiting for confirmation.
+    pub client_top_up_running: bool,
     /// Connected client contract account and data-cell state.
     pub client_contract: Option<ClientContractSnapshot>,
 }
@@ -437,7 +437,7 @@ impl CocoonClient {
             wallet_seqno: wallet.and_then(|wallet| wallet.seqno),
             wallet_state: wallet.map(|wallet| wallet.state.as_str().to_string()),
             wallet_last_tx_lt: wallet.and_then(|wallet| wallet.last_tx_lt),
-            sc_request_running: self.client_top_up_request.is_some(),
+            client_top_up_running: self.client_top_up_request.is_some(),
             client_contract: ton.client_contract,
         }
     }
