@@ -17,8 +17,8 @@ Current scope:
 - Collect streamed Cocoon answer parts before returning the local HTTP response.
 - Expose local runtime statistics through `/stats`, `/jsonstats`, and `/v1/stats`.
 - Read Cocoon wallet/client-contract state from TON liteservers.
-- Send owner control transactions through the Cocoon wallet for `/request/withdraw` and `/request/close`.
-- Sweep the closed Cocoon wallet balance back to the owner wallet through `/wallet/withdraw`.
+- Send owner control transactions through the Cocoon wallet with CLI commands.
+- Sweep the closed Cocoon wallet balance back to the owner wallet with the CLI.
 
 Workspace layout:
 
@@ -92,8 +92,8 @@ contract address in `client.connectToProxy`.
 
 `[ton]` uses TON liteservers to fill `/stats.wallet.*`,
 `/stats.client_contract.*`, and the masterchain seqno used for the read. The
-same liteclient path sends signed external messages for explicit control
-endpoints. It does not top up or register contracts. Omit `config_path` to use
+same liteclient path sends signed external messages for explicit CLI controls.
+It does not top up or register contracts. Omit `config_path` to use
 rocoon's embedded mainnet config, or the `ton-rs` default when `mainnet = false`.
 
 Use a different config file:
@@ -132,8 +132,6 @@ API:
 ```bash
 curl http://127.0.0.1:9999/v1/models
 curl http://127.0.0.1:9999/stats
-curl http://127.0.0.1:9999/request/close
-curl http://127.0.0.1:9999/wallet/withdraw
 curl http://127.0.0.1:9999/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"Qwen/Qwen3-32B","messages":[{"role":"user","content":"Say hello"}],"max_tokens":8}'
@@ -146,13 +144,6 @@ When `[ton].readonly_enabled` is true, it also returns TON wallet balance,
 seqno, account state, last transaction logical time, client-contract state,
 stake/balance/tokens fields, and masterchain seqno.
 
-Control endpoints:
-
-- `GET/POST /request/withdraw` sends `owner_client_withdraw` to the current client contract.
-- `GET/POST /request/close` sends `owner_client_request_refund` to the current client contract.
-- `GET/POST /wallet/withdraw` sends the sweepable Cocoon wallet balance to `client.owner_address` after `/request/close` was confirmed by this `rocoon` process.
-- `/wallet/withdraw` keeps `100000000` nanotons by default for fees; override with `?reserve_nanotons=<value>` or JSON `{"reserve_nanotons":100000000}`.
-
 When the proxy returns `auth: short`, `rocoon` uses `client.secret` or
 `COCOON_CLIENT_SECRET` to call `client.authorizeWithProxyShort`.
 
@@ -160,8 +151,8 @@ When the proxy returns `auth: long`, `rocoon` stops before register/top-up,
 because that requires on-chain TON transactions.
 
 `/v1/chat/completions` spends Cocoon tokens through the existing authorized
-client balance. The control endpoints send TON transactions, so keep them
-bound to localhost unless you add authentication in front of the server.
+client balance. TON control transactions are available only through the CLI
+commands above.
 
 ## License
 

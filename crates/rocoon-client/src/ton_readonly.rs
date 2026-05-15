@@ -4,7 +4,7 @@
 //! exposes it from `/stats`. This module asks liteservers for
 //! masterchain/account state, parses Cocoon wallet/client-contract data cells,
 //! and contains the narrowly scoped wallet forwarding path used by local
-//! `/request/withdraw` and `/request/close`.
+//! `request-withdraw` and `close` CLI commands.
 
 use std::path::Path;
 use std::str::FromStr;

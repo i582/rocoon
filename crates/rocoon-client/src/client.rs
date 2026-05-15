@@ -580,7 +580,7 @@ impl CocoonClient {
     ///
     /// The transfer is intentionally allowed only after the connected client
     /// contract is in Cocoon state `closed`. This keeps the wallet funded while
-    /// `/request/close` may still need another on-chain message.
+    /// the `close` command may still need another on-chain message.
     ///
     /// # Errors
     ///
