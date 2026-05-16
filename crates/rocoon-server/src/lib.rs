@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use rocoon_client::CocoonClient;
 use rocoon_openai::errors as openai_errors;
-use tiny_http::{Method, Request};
+use tiny_http::{Method, Request, Server};
 
 mod handlers;
 mod http;
@@ -42,6 +42,12 @@ pub struct Defaults {
     pub timeout: f64,
 }
 
+/// Bound local HTTP listener reserved before proxy authorization starts.
+pub struct Listener {
+    listen_addr: String,
+    server: Server,
+}
+
 /// Shared state for all local HTTP request handler threads.
 pub(crate) struct ServerState {
     client: Mutex<CocoonClient>,
@@ -62,6 +68,20 @@ impl ServerState {
     }
 }
 
+/// Binds the local HTTP listener and reserves the configured port.
+///
+/// # Errors
+///
+/// Returns an error if `listen_addr` cannot be bound.
+pub fn bind(listen_addr: &str) -> Result<Listener> {
+    let server = Server::http(listen_addr)
+        .map_err(|error| anyhow::anyhow!("bind {listen_addr}: {error}"))?;
+    Ok(Listener {
+        listen_addr: listen_addr.to_string(),
+        server,
+    })
+}
+
 /// Serves the local OpenAI-compatible API until shutdown is requested.
 ///
 /// Supported endpoints are `/health`, `/stats`, `/jsonstats`, `/v1/stats`,
@@ -80,8 +100,25 @@ pub fn serve(
     defaults: Defaults,
     shutdown_requested: &Arc<AtomicBool>,
 ) -> Result<SessionSummary> {
-    let server = tiny_http::Server::http(listen_addr)
-        .map_err(|error| anyhow::anyhow!("bind {listen_addr}: {error}"))?;
+    let listener = bind(listen_addr)?;
+    serve_bound(listener, client, defaults, shutdown_requested)
+}
+
+/// Serves the local OpenAI-compatible API using an already-bound listener.
+///
+/// # Errors
+///
+/// Returns an error if an incoming TCP connection cannot be accepted.
+pub fn serve_bound(
+    listener: Listener,
+    client: CocoonClient,
+    defaults: Defaults,
+    shutdown_requested: &Arc<AtomicBool>,
+) -> Result<SessionSummary> {
+    let Listener {
+        listen_addr,
+        server,
+    } = listener;
     let started_at = Instant::now();
     println!("OpenAI-compatible HTTP server listening on http://{listen_addr}");
 
