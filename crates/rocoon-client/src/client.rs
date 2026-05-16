@@ -1611,7 +1611,7 @@ fn wait_for_long_auth_funding(config: &RuntimeConfig) -> Result<()> {
     println!("Address: {}", config.cocoon_wallet_address);
     println!(
         "Deposit {} to this address, then continue.",
-        "20 TON".yellow().bold().to_string()
+        "20 TON".yellow().bold()
     );
     wait_for_enter("Press Enter after funding...")?;
 

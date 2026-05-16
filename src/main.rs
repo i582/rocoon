@@ -11,7 +11,8 @@ use clap::{ColorChoice, CommandFactory, Parser, Subcommand};
 use inquire::Text;
 use inquire::validator::{ErrorMessage, Validation};
 use rocoon_client::{
-    COCOON_WALLET_RESERVE_NANOTONS, CocoonClient, is_client_contract_closed_or_closing_error,
+    COCOON_WALLET_RESERVE_NANOTONS, CocoonClient, ModelInfo,
+    is_client_contract_closed_or_closing_error,
 };
 use rocoon_config::{
     RuntimeConfig,
@@ -54,6 +55,11 @@ struct Cli {
 enum Command {
     /// Start the local OpenAI-compatible HTTP server.
     Start,
+    /// Query models advertised by the Cocoon proxy.
+    Models {
+        #[command(subcommand)]
+        command: ModelsCommand,
+    },
     /// Withdraw balance above stake from the client contract to the Cocoon wallet.
     #[command(name = "request-withdraw")]
     RequestWithdraw {
@@ -86,6 +92,12 @@ enum Command {
         )]
         reserve_nanotons: u64,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum ModelsCommand {
+    /// List models advertised by the Cocoon proxy.
+    List,
 }
 
 fn main() {
@@ -121,6 +133,9 @@ fn run() -> Result<()> {
 
     match command {
         Command::Start => serve_http(&config),
+        Command::Models {
+            command: ModelsCommand::List,
+        } => list_models(&config),
         Command::RequestWithdraw { client_contract } => {
             request_withdraw(&config, client_contract.as_deref())
         }
@@ -262,6 +277,26 @@ fn prompt_owner_address() -> Result<String> {
 }
 
 fn serve_http(config: &RuntimeConfig) -> Result<()> {
+    let client = connect_cocoon_interactive(config)?;
+    let defaults = Defaults {
+        max_coefficient: config.max_coefficient,
+        max_tokens: config.max_tokens,
+        timeout: config.request_timeout,
+    };
+    serve(&config.listen_addr, client, defaults)
+}
+
+fn list_models(config: &RuntimeConfig) -> Result<()> {
+    let mut client = connect_cocoon_interactive(config)?;
+    println!("{} Fetching models", ">".cyan().bold());
+    let models = client
+        .get_worker_types_v2()
+        .context("fetch Cocoon models")?;
+    print_models(&models);
+    Ok(())
+}
+
+fn connect_cocoon_interactive(config: &RuntimeConfig) -> Result<CocoonClient> {
     fail_if_cached_client_contract_is_closed(config)?;
     let client = match CocoonClient::connect_interactive(config) {
         Ok(client) => client,
@@ -275,12 +310,23 @@ fn serve_http(config: &RuntimeConfig) -> Result<()> {
         client.client_contract_address(),
         ClientContractStatus::Active,
     );
-    let defaults = Defaults {
-        max_coefficient: config.max_coefficient,
-        max_tokens: config.max_tokens,
-        timeout: config.request_timeout,
-    };
-    serve(&config.listen_addr, client, defaults)
+    Ok(client)
+}
+
+fn print_models(models: &[ModelInfo]) {
+    if models.is_empty() {
+        println!("{} No models available", "✓".green().bold());
+        return;
+    }
+
+    println!(
+        "{} Available models: {}",
+        "✓".green().bold(),
+        models.len().to_string().cyan().bold()
+    );
+    for model in models {
+        println!("{}", model.id.cyan().bold());
+    }
 }
 
 fn request_withdraw(config: &RuntimeConfig, client_contract: Option<&str>) -> Result<()> {
