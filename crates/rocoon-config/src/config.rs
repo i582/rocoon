@@ -198,6 +198,20 @@ impl RuntimeConfig {
         )
     }
 
+    /// Loads only the local HTTP listen address using TOML defaults and env overrides.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the config cannot be read or `server.listen_addr` is empty.
+    pub fn load_listen_addr_cli(config_path: Option<PathBuf>) -> Result<String> {
+        let explicit_config_path = config_path.is_some();
+        let config_path = config_path.unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
+        let mut config = read_config(&config_path, explicit_config_path)?;
+        apply_string_env("ROCOON_LISTEN_ADDR", &mut config.server.listen_addr)?;
+        validate_listen_addr(&config.server.listen_addr)?;
+        Ok(config.server.listen_addr)
+    }
+
     fn load_from_path(
         config_path: PathBuf,
         explicit_config_path: bool,
@@ -459,9 +473,7 @@ fn validate(config: &FileConfig) -> Result<()> {
     if config.network.connect_timeout_secs == 0 {
         anyhow::bail!("network.connect_timeout_secs must be greater than zero");
     }
-    if config.server.listen_addr.trim().is_empty() {
-        anyhow::bail!("server.listen_addr must not be empty");
-    }
+    validate_listen_addr(&config.server.listen_addr)?;
     if config.client.owner_address.trim().is_empty() {
         anyhow::bail!("client.owner_address must not be empty");
     }
@@ -489,6 +501,13 @@ fn validate(config: &FileConfig) -> Result<()> {
     }
     if config.ton.query_timeout_millis == 0 {
         anyhow::bail!("ton.query_timeout_millis must be greater than zero");
+    }
+    Ok(())
+}
+
+fn validate_listen_addr(listen_addr: &str) -> Result<()> {
+    if listen_addr.trim().is_empty() {
+        anyhow::bail!("server.listen_addr must not be empty");
     }
     Ok(())
 }

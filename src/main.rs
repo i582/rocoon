@@ -20,6 +20,8 @@ use rocoon_config::{
 };
 use rocoon_server::{Defaults, serve};
 
+mod commands;
+
 const NANOTONS_PER_TON: u64 = 1_000_000_000;
 const STATE_FILE_NAME: &str = ".rocoon-state";
 
@@ -55,6 +57,8 @@ struct Cli {
 enum Command {
     /// Start the local OpenAI-compatible HTTP server.
     Start,
+    /// Check the local OpenAI-compatible HTTP server.
+    Health,
     /// Query models advertised by the Cocoon proxy.
     Models {
         #[command(subcommand)]
@@ -126,6 +130,11 @@ fn run() -> Result<()> {
         run_initial_setup(&RuntimeConfig::default_config_path())?;
     }
 
+    if matches!(command, Command::Health) {
+        let listen_addr = RuntimeConfig::load_listen_addr_cli(config)?;
+        return commands::health::run(&listen_addr, verbose);
+    }
+
     let config = RuntimeConfig::load_cli(config, verbose)?;
     if config.verbose {
         println!("config: {}", config.config_path.display());
@@ -133,6 +142,7 @@ fn run() -> Result<()> {
 
     match command {
         Command::Start => serve_http(&config),
+        Command::Health => unreachable!("health is handled before full config loading"),
         Command::Models {
             command: ModelsCommand::List,
         } => list_models(&config),
