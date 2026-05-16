@@ -77,6 +77,9 @@ keywords = ["cocoon", "ton", "openai", "proxy"]
 categories = ["command-line-utilities", "network-programming"]
 publish = false
 
+[package.metadata.dist]
+dist = true
+
 [lints]
 workspace = true
 
@@ -89,3 +92,10 @@ rocoon-config = { workspace = true }
 rocoon-server = { workspace = true }
 serde_json.workspace = true
 signal-hook.workspace = true
+
+[profile.release-size]
+inherits = "release"
+lto = "thin"
+
+[profile.dist]
+inherits = "release-size"
