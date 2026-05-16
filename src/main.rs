@@ -59,6 +59,20 @@ enum Command {
     Health,
     /// Show local OpenAI-compatible HTTP server stats.
     Stats,
+    /// Open a minimal terminal chat against the local OpenAI-compatible server.
+    Chat {
+        /// Model id from `rocoon models list`.
+        #[arg(short, long, value_name = "MODEL")]
+        model: String,
+
+        /// Maximum number of tokens to request from the model.
+        #[arg(long, value_name = "TOKENS", default_value_t = 1024)]
+        max_tokens: i32,
+
+        /// Cocoon request timeout in seconds.
+        #[arg(long, value_name = "SECONDS", default_value_t = 120.0)]
+        timeout: f64,
+    },
     /// Query models advertised by the Cocoon proxy.
     Models {
         #[command(subcommand)]
@@ -169,6 +183,15 @@ fn run() -> Result<()> {
         let listen_addr = RuntimeConfig::load_listen_addr_cli(config)?;
         return commands::stats::run(&listen_addr, verbose);
     }
+    if let Command::Chat {
+        model,
+        max_tokens,
+        timeout,
+    } = &command
+    {
+        let listen_addr = RuntimeConfig::load_listen_addr_cli(config)?;
+        return commands::chat::run(&listen_addr, model, *max_tokens, *timeout, verbose);
+    }
 
     let config = RuntimeConfig::load_cli(config, verbose)?;
     if config.verbose {
@@ -179,6 +202,7 @@ fn run() -> Result<()> {
         Command::Start => commands::start::run(&config),
         Command::Health => unreachable!("health is handled before full config loading"),
         Command::Stats => unreachable!("stats is handled before full config loading"),
+        Command::Chat { .. } => unreachable!("chat is handled before full config loading"),
         Command::Models {
             command: ModelsCommand::List,
         } => commands::models::list(&config),

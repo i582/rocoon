@@ -1,3 +1,4 @@
+pub mod chat;
 pub mod health;
 mod local_http;
 pub mod models;
