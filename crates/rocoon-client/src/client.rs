@@ -238,12 +238,12 @@ impl CocoonClient {
         loop {
             println!(
                 "{} Connecting to Cocoon proxy {}",
-                color_status("info"),
+                ">".cyan().bold(),
                 config.proxy_addr
             );
             match Self::connect_with_verbosity(config, verbosity) {
                 Ok(client) => {
-                    println!("{} Cocoon proxy connected", color_status("ok"));
+                    println!("{} Cocoon proxy connected", "✓".green().bold());
                     return Ok(client);
                 }
                 Err(error) => {
@@ -314,7 +314,7 @@ impl CocoonClient {
             resolve_client_contract_address(config, client_contract_address, verbosity)?;
         println!(
             "{} Sending {action_name} request to {}",
-            color_status("info"),
+            ">".cyan().bold(),
             client_contract_address
         );
         send_client_control_from_config(config, &client_contract_address, action)
@@ -341,7 +341,7 @@ impl CocoonClient {
             resolve_client_contract_address(config, client_contract_address, verbosity)?;
         println!(
             "{} Sweeping Cocoon wallet via client contract {}",
-            color_status("info"),
+            ">".cyan().bold(),
             client_contract_address
         );
         sweep_cocoon_wallet_from_config(
@@ -1252,7 +1252,7 @@ fn resolve_client_contract_address(
     if let Some(address) = client_contract_address.filter(|address| !address.is_empty()) {
         return Ok(address.to_string());
     }
-    println!("{} Resolving Cocoon client contract", color_status("info"));
+    println!("{} Resolving Cocoon client contract", ">".cyan().bold());
     Ok(discover_proxy_info(config, verbosity)
         .context("discover client contract; pass --client-contract if the proxy cannot resolve it")?
         .client_sc_address)
@@ -1423,7 +1423,7 @@ fn authorize_long(
     if verbosity.is_interactive() {
         println!(
             "{} Long auth transaction sent, waiting for proxy confirmation",
-            color_status("ok")
+            "✓".green().bold()
         );
     } else if verbosity.is_verbose() {
         println!(
@@ -1568,7 +1568,7 @@ fn ensure_short_auth_secret_hash(
             .context("client contract state is unavailable for short-auth secret update")?;
         if client_contract.secret_hash == Some(desired_secret_hash) {
             if sent_update && verbosity.is_interactive() {
-                println!("{} Short auth token installed", color_status("ok"));
+                println!("{} Short auth token installed", "✓".green().bold());
             }
             return Ok(());
         }
@@ -1614,7 +1614,7 @@ fn ensure_short_auth_secret_hash(
 fn wait_for_long_auth_funding(config: &RuntimeConfig) -> Result<()> {
     println!(
         "{} Long auth requires a funded Cocoon wallet",
-        color_status("info")
+        ">".cyan().bold()
     );
     println!("Address: {}", config.cocoon_wallet_address);
     println!(
@@ -1636,7 +1636,7 @@ fn wait_for_long_auth_funding(config: &RuntimeConfig) -> Result<()> {
             Ok(balance) => {
                 println!(
                     "{} Cocoon wallet balance: {} TON",
-                    color_status("ok"),
+                    "✓".green().bold(),
                     format_nanotons(balance)
                 );
                 return Ok(());
@@ -1644,7 +1644,7 @@ fn wait_for_long_auth_funding(config: &RuntimeConfig) -> Result<()> {
             Err(error) => {
                 println!(
                     "{} Could not check Cocoon wallet balance: {error:#}",
-                    color_status("warn")
+                    "!".yellow().bold()
                 );
                 println!("Continuing; TON will return a clear error if the wallet is underfunded.");
                 return Ok(());
@@ -1675,7 +1675,7 @@ fn wait_for_enter(prompt: &str) -> Result<()> {
 fn print_wallet_balance_problem(wallet_address: &str, current: u64, required: u64) {
     let missing = required.saturating_sub(current);
     println!();
-    println!("{} Cocoon wallet needs funding", color_status("warn"));
+    println!("{} Cocoon wallet needs funding", "!".yellow().bold());
     println!("Address: {wallet_address}");
     println!("Current: {} TON", format_nanotons(current));
     println!("Required: {} TON", format_nanotons(required));
@@ -1692,7 +1692,7 @@ fn wallet_funding_required_from_error(
 
 fn print_actionable_balance_error(error: &CocoonWalletFundingRequired) {
     println!();
-    println!("{} Cocoon wallet needs funding", color_status("warn"));
+    println!("{} Cocoon wallet needs funding", "!".yellow().bold());
     println!("Address: {}", error.wallet_address);
     println!("Current: {} TON", format_nanotons(error.current_balance));
     println!("Required: {} TON", format_nanotons(error.required_balance));
@@ -1703,15 +1703,6 @@ fn format_nanotons(value: u64) -> String {
     let whole = value / NANOTONS_PER_TON;
     let fraction = value % NANOTONS_PER_TON;
     format!("{whole}.{fraction:09}")
-}
-
-fn color_status(status: &str) -> String {
-    match status {
-        "ok" => "✓".green().bold().to_string(),
-        "warn" => "!".yellow().bold().to_string(),
-        "info" => ">".cyan().bold().to_string(),
-        _ => String::new(),
-    }
 }
 
 fn color_amount(amount: &'static str) -> String {
