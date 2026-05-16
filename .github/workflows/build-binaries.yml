@@ -1,0 +1,97 @@
+name: Build Binaries
+
+on:
+  pull_request:
+    branches:
+      - master
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+concurrency:
+  group: build-binaries-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: { }
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+
+    permissions:
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            arch: x86_64
+            os: ubuntu-24.04
+            artifact: rocoon-linux-x86_64
+            binary: rocoon
+          - name: Linux
+            arch: arm64
+            os: ubuntu-24.04-arm
+            artifact: rocoon-linux-arm64
+            binary: rocoon
+          - name: Windows
+            arch: x86_64
+            os: windows-2025
+            artifact: rocoon-windows-x86_64
+            binary: rocoon.exe
+          - name: Windows
+            arch: arm64
+            os: windows-11-arm
+            artifact: rocoon-windows-arm64
+            binary: rocoon.exe
+          - name: macOS
+            arch: x86_64
+            os: macos-15-intel
+            artifact: rocoon-macos-x86_64
+            binary: rocoon
+          - name: macOS
+            arch: arm64
+            os: macos-15
+            artifact: rocoon-macos-arm64
+            binary: rocoon
+
+    steps:
+      - name: Fetch Sources
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: ${{ runner.os }}-${{ runner.arch }}
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Install Rust
+        shell: bash
+        run: rustup toolchain install
+
+      - name: Build binary
+        shell: bash
+        run: cargo build --release --locked --bin rocoon
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/${{ matrix.artifact }}"
+          cp "target/release/${{ matrix.binary }}" "dist/${{ matrix.artifact }}/"
+          cp LICENSE-APACHE LICENSE-MIT README.md "dist/${{ matrix.artifact }}/"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 1
