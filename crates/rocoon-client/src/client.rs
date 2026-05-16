@@ -309,9 +309,8 @@ impl CocoonClient {
             TonControlAction::Withdraw => "withdraw",
             TonControlAction::RequestRefund => "close",
         };
-        let verbosity = ConnectVerbosity::interactive(config.verbose);
         let client_contract_address =
-            resolve_client_contract_address(config, client_contract_address, verbosity)?;
+            resolve_client_contract_address(config, client_contract_address, config.verbose)?;
         println!(
             "{} Sending {action_name} request to {}",
             ">".cyan().bold(),
@@ -336,9 +335,8 @@ impl CocoonClient {
         destination_address: Option<&str>,
         reserve_nanotons: u64,
     ) -> Result<TonWalletTransferResult> {
-        let verbosity = ConnectVerbosity::interactive(config.verbose);
         let client_contract_address =
-            resolve_client_contract_address(config, client_contract_address, verbosity)?;
+            resolve_client_contract_address(config, client_contract_address, config.verbose)?;
         println!(
             "{} Sweeping Cocoon wallet via client contract {}",
             ">".cyan().bold(),
@@ -353,7 +351,7 @@ impl CocoonClient {
     }
 
     fn connect_with_verbosity(config: &RuntimeConfig, verbosity: ConnectVerbosity) -> Result<Self> {
-        let mut session = open_session(config, verbosity)?;
+        let mut session = open_session(config, verbosity.is_verbose())?;
         let mut ton_readonly = TonReadonlyState::new(config);
         let authorization = authorize(&mut session, config, &mut ton_readonly, verbosity)?;
 
@@ -1192,12 +1190,9 @@ struct LongAuthParams<'a> {
     prompt_for_funding: bool,
 }
 
-fn open_session(
-    config: &RuntimeConfig,
-    verbosity: ConnectVerbosity,
-) -> Result<Session<ratls::RatlsStream>> {
+fn open_session(config: &RuntimeConfig, verbose: bool) -> Result<Session<ratls::RatlsStream>> {
     let addr = &config.proxy_addr;
-    if verbosity.is_verbose() {
+    if verbose {
         println!("connecting to Cocoon proxy at {addr}");
     }
     let socket_addr = addr
@@ -1211,7 +1206,7 @@ fn open_session(
     tcp.set_nodelay(true).context("set TCP_NODELAY")?;
 
     let pow = pow::handshake(&mut tcp).context("Cocoon TCP PoW handshake")?;
-    if verbosity.is_verbose() {
+    if verbose {
         println!(
             "pow solved: difficulty={} nonce={} elapsed_ms={}",
             pow.difficulty,
@@ -1221,7 +1216,7 @@ fn open_session(
     }
 
     let tls = ratls::connect(tcp).context("Cocoon RA-TLS handshake")?;
-    if verbosity.is_verbose() {
+    if verbose {
         println!(
             "tls connected: server_cert_der_len={}",
             tls.server_cert_der_len()
@@ -1230,30 +1225,27 @@ fn open_session(
 
     let (session, connected) =
         Session::connect(tls).context("Cocoon tcp.connect session handshake")?;
-    if verbosity.is_verbose() {
+    if verbose {
         println!("session connected: id={}", connected.id);
     }
     Ok(session)
 }
 
-fn discover_proxy_info(
-    config: &RuntimeConfig,
-    verbosity: ConnectVerbosity,
-) -> Result<ConnectedProxyInfo> {
-    let mut session = open_session(config, verbosity)?;
+fn discover_proxy_info(config: &RuntimeConfig, verbose: bool) -> Result<ConnectedProxyInfo> {
+    let mut session = open_session(config, verbose)?;
     connect_to_proxy(&mut session, config)
 }
 
 fn resolve_client_contract_address(
     config: &RuntimeConfig,
     client_contract_address: Option<&str>,
-    verbosity: ConnectVerbosity,
+    verbose: bool,
 ) -> Result<String> {
     if let Some(address) = client_contract_address.filter(|address| !address.is_empty()) {
         return Ok(address.to_string());
     }
     println!("{} Resolving Cocoon client contract", ">".cyan().bold());
-    Ok(discover_proxy_info(config, verbosity)
+    Ok(discover_proxy_info(config, verbose)
         .context("discover client contract; pass --client-contract if the proxy cannot resolve it")?
         .client_sc_address)
 }
@@ -1312,7 +1304,8 @@ fn authorize(
     ton_readonly: &mut TonReadonlyState,
     verbosity: ConnectVerbosity,
 ) -> Result<AuthorizationInfo> {
-    if verbosity.is_verbose() {
+    let verbose = verbosity.is_verbose();
+    if verbose {
         println!(
             "authenticating owner {} via Cocoon wallet {}",
             config.owner_address, config.cocoon_wallet_address
@@ -1325,9 +1318,9 @@ fn authorize(
             if let Some(secret) = config.client_secret.as_deref()
                 && secret_hash_matches(secret, &secret_hash)
             {
-                authorize_short(session, secret, verbosity)?
+                authorize_short(session, secret, verbose)?
             } else {
-                if verbosity.is_verbose() {
+                if verbose {
                     eprintln!(
                         "short auth secret is unavailable or stale; falling back to long auth"
                     );
@@ -1374,14 +1367,14 @@ fn authorize(
 fn authorize_short(
     session: &mut Session<ratls::RatlsStream>,
     secret: &str,
-    verbosity: ConnectVerbosity,
+    verbose: bool,
 ) -> Result<AuthPaymentStatus> {
     let request = cocoon::encode_authorize_with_proxy_short(secret);
     let response = session
         .make_request_with_timeout(&request, AUTH_REQUEST_TIMEOUT)
         .context("client.authorizeWithProxyShort")?;
     let auth = cocoon::decode_authorization_with_proxy(&response)?;
-    payment_status_from_auth(&auth, verbosity)
+    payment_status_from_auth(&auth, verbose)
 }
 
 fn authorize_long(
@@ -1443,7 +1436,7 @@ fn authorize_long(
         .make_request_with_timeout(&request, AUTH_REQUEST_TIMEOUT)
         .context("client.authorizeWithProxyLong")?;
     let auth = cocoon::decode_authorization_with_proxy(&response)?;
-    let payment_status = payment_status_from_auth(&auth, verbosity)?;
+    let payment_status = payment_status_from_auth(&auth, verbosity.is_verbose())?;
     ensure_short_auth_secret_hash(config, ton_readonly, params.client_sc_address, verbosity)?;
     Ok(payment_status)
 }
@@ -1726,7 +1719,7 @@ const fn tl_long_to_u64(value: i64) -> u64 {
 /// Converts the proxy authorization result into local payment status.
 fn payment_status_from_auth(
     auth: &cocoon::AuthorizationWithProxy<'_>,
-    verbosity: ConnectVerbosity,
+    verbose: bool,
 ) -> Result<AuthPaymentStatus> {
     match auth {
         cocoon::AuthorizationWithProxy::Success {
@@ -1734,7 +1727,7 @@ fn payment_status_from_auth(
             tokens_committed_to_db,
             max_tokens,
         } => {
-            if verbosity.is_verbose() {
+            if verbose {
                 println!(
                     "auth success: tokens_committed_to_db={tokens_committed_to_db} max_tokens={max_tokens}"
                 );
