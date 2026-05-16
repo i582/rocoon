@@ -119,16 +119,18 @@ rocoon request-withdraw
 rocoon close
 rocoon withdraw --client-contract <client-contract-address>
 rocoon withdraw --to <destination-address> --reserve-nanotons 100000000
-rocoon proxies
-rocoon proxies --root-contract <cocoon-root-contract-address>
+rocoon proxies list
+rocoon proxies list --root-contract <cocoon-root-contract-address>
+rocoon proxies inspect <proxy-seqno-or-address>
 ```
 
 `request-withdraw` sends `owner_client_withdraw` from the client contract to the
 Cocoon wallet. `close` sends `owner_client_request_refund`. `withdraw` or
 `sweep` sends the sweepable Cocoon wallet balance to `client.owner_address` or
-`--to`. `proxies` reads the Cocoon root contract, prints registered proxy
-addresses, and probes each proxy for its smart-contract address. If proxy
-discovery cannot resolve an already closed client contract,
+`--to`. `proxies list` reads the Cocoon root contract and prints registered
+proxy addresses. `proxies inspect` shows one proxy handshake in detail,
+including its smart-contract address. If proxy discovery cannot resolve
+an already closed client contract,
 `rocoon` first tries the locally cached client contract from `.rocoon-state`;
 if there is no matching cache, pass the contract address with `--client-contract`.
 When the proxy reports that the cached client contract is closing or closed,

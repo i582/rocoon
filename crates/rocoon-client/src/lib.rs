@@ -9,7 +9,8 @@ mod ton_readonly;
 
 pub use client::{
     AuthPaymentStatus, ClientContractClosedOrClosing, ClientStatus, CocoonClient, HttpExchange,
-    ModelInfo, ProxyHandshakeInfo, WorkerInfo, is_client_contract_closed_or_closing_error,
+    ModelInfo, ProxyHandshakeAuth, ProxyHandshakeInfo, WorkerInfo,
+    is_client_contract_closed_or_closing_error,
 };
 pub use rocoon_config::RuntimeConfig;
 pub use rocoon_transport::{QueryFinalInfo, TokenUsage};

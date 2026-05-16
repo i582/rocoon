@@ -190,12 +190,30 @@ pub struct WorkerInfo {
 pub struct ProxyHandshakeInfo {
     /// TCP address used for the probe.
     pub proxy_addr: String,
+    /// Proxy public key returned by `client.connectedToProxy`.
+    pub proxy_public_key: [u8; 32],
     /// Protocol version negotiated with the proxy.
     pub proto_version: i32,
+    /// Whether the proxy reports a testnet configuration.
+    pub is_test: Option<bool>,
     /// Proxy owner address returned by `client.connectedToProxy`.
     pub proxy_owner_address: String,
     /// Proxy smart-contract address returned by `client.connectedToProxy`.
     pub proxy_sc_address: String,
+    /// Client smart-contract address returned by `client.connectedToProxy`.
+    pub client_sc_address: String,
+    /// Authorization mode selected by the proxy.
+    pub auth: ProxyHandshakeAuth,
+    /// Whether the proxy attached signed payment data to the connection reply.
+    pub signed_payment_available: bool,
+}
+
+/// Authorization mode returned by a lightweight proxy probe.
+pub enum ProxyHandshakeAuth {
+    /// Existing registered client can authorize with a shared secret.
+    Short { nonce: i64 },
+    /// Client must perform on-chain registration before requests can run.
+    Long { nonce: i64 },
 }
 
 /// HTTP response returned by Cocoon after an inference request.
@@ -406,9 +424,14 @@ impl CocoonClient {
         let info = discover_proxy_info(&config, config.verbose)?;
         Ok(ProxyHandshakeInfo {
             proxy_addr: config.proxy_addr,
+            proxy_public_key: info.proxy_public_key,
             proto_version: info.proto_version,
+            is_test: info.is_test,
             proxy_owner_address: info.proxy_owner_address,
             proxy_sc_address: info.proxy_sc_address,
+            client_sc_address: info.client_sc_address,
+            auth: proxy_handshake_auth(&info.auth),
+            signed_payment_available: info.signed_payment_available,
         })
     }
 
@@ -1244,11 +1267,13 @@ struct AuthorizationInfo {
 
 struct ConnectedProxyInfo {
     proto_version: i32,
+    is_test: Option<bool>,
     proxy_owner_address: String,
     proxy_sc_address: String,
     client_sc_address: String,
     proxy_public_key: [u8; 32],
     auth: ProxyAuthInfo,
+    signed_payment_available: bool,
 }
 
 enum ProxyAuthInfo {
@@ -1349,6 +1374,7 @@ fn connect_to_proxy(
     };
     Ok(ConnectedProxyInfo {
         proto_version: connected_to_proxy.params.proto_version.unwrap_or(0),
+        is_test: connected_to_proxy.params.is_test,
         proxy_owner_address: String::from_utf8_lossy(connected_to_proxy.params.proxy_owner_address)
             .into_owned(),
         proxy_sc_address: String::from_utf8_lossy(connected_to_proxy.params.proxy_sc_address)
@@ -1357,7 +1383,18 @@ fn connect_to_proxy(
             .into_owned(),
         proxy_public_key: *connected_to_proxy.params.proxy_public_key,
         auth,
+        signed_payment_available: matches!(
+            connected_to_proxy.signed_payment,
+            cocoon::SignedPayment::Data { .. }
+        ),
     })
+}
+
+const fn proxy_handshake_auth(auth: &ProxyAuthInfo) -> ProxyHandshakeAuth {
+    match auth {
+        ProxyAuthInfo::Short { nonce, .. } => ProxyHandshakeAuth::Short { nonce: *nonce },
+        ProxyAuthInfo::Long { nonce } => ProxyHandshakeAuth::Long { nonce: *nonce },
+    }
 }
 
 fn proxy_query_error_is_client_closing(error: &anyhow::Error) -> bool {

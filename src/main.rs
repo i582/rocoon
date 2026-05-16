@@ -98,9 +98,8 @@ enum Command {
     },
     /// Print registered proxies from the Cocoon root contract.
     Proxies {
-        /// Root contract address. Defaults to `[ton].root_contract_address`.
-        #[arg(long, value_name = "ADDRESS")]
-        root_contract: Option<String>,
+        #[command(subcommand)]
+        command: ProxiesCommand,
     },
 }
 
@@ -113,6 +112,26 @@ enum ModelsCommand {
         /// Model id from `rocoon models list`.
         #[arg(value_name = "MODEL")]
         model: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProxiesCommand {
+    /// List registered proxies from the Cocoon root contract.
+    List {
+        /// Root contract address. Defaults to `[ton].root_contract_address`.
+        #[arg(long, value_name = "ADDRESS")]
+        root_contract: Option<String>,
+    },
+    /// Show handshake details for one proxy.
+    Inspect {
+        /// Proxy seqno or address from `rocoon proxies list`.
+        #[arg(value_name = "SEQNO_OR_ADDRESS")]
+        proxy: String,
+
+        /// Root contract address. Defaults to `[ton].root_contract_address`.
+        #[arg(long, value_name = "ADDRESS")]
+        root_contract: Option<String>,
     },
 }
 
@@ -183,9 +202,16 @@ fn run() -> Result<()> {
                 reserve_nanotons,
             )
         }
-        Command::Proxies { root_contract } => {
-            commands::proxies::run(&config, root_contract.as_deref())
-        }
+        Command::Proxies {
+            command: ProxiesCommand::List { root_contract },
+        } => commands::proxies::list(&config, root_contract.as_deref()),
+        Command::Proxies {
+            command:
+                ProxiesCommand::Inspect {
+                    proxy,
+                    root_contract,
+                },
+        } => commands::proxies::inspect(&config, &proxy, root_contract.as_deref()),
     }
 }
 
