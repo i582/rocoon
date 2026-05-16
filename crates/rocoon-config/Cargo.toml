@@ -16,6 +16,7 @@ base64.workspace = true
 clap.workspace = true
 ed25519-dalek.workspace = true
 owo-colors.workspace = true
+rand.workspace = true
 rocoon-contract = { workspace = true }
 serde.workspace = true
 ton.workspace = true

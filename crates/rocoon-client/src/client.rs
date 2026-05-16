@@ -8,12 +8,12 @@
 
 use std::error::Error;
 use std::fmt;
-use std::io::{self, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use inquire::Text;
 use rand::Rng;
 use sha2::{Digest, Sha256};
 
@@ -27,7 +27,7 @@ use crate::ton_readonly::{
     TonReadonlySnapshot, TonWalletSnapshot, TonWalletTransferPreparedMessage,
     TonWalletTransferRequest, TonWalletTransferResult,
 };
-use rocoon_config::{RuntimeConfig, TonRuntimeConfig};
+use rocoon_config::{RuntimeConfig, TonRuntimeConfig, color::OwoColorize};
 use rocoon_protocol::{self as cocoon, RunQueryOptions, WorkerInstanceV2, WorkerTypeV2};
 use rocoon_transport::{QueryError, QueryFinalInfo, RunQueryOutput, Session, pow, ratls};
 
@@ -1666,10 +1666,9 @@ fn read_interactive_wallet_balance(config: &RuntimeConfig) -> Result<u64> {
 }
 
 fn wait_for_enter(prompt: &str) -> Result<()> {
-    print!("{prompt}");
-    io::stdout().flush().context("flush prompt")?;
-    let mut line = String::new();
-    io::stdin().read_line(&mut line).context("read Enter")?;
+    Text::new(prompt)
+        .prompt()
+        .context("read prompt confirmation")?;
     Ok(())
 }
 
@@ -1706,17 +1705,17 @@ fn format_nanotons(value: u64) -> String {
     format!("{whole}.{fraction:09}")
 }
 
-fn color_status(status: &str) -> &'static str {
+fn color_status(status: &str) -> String {
     match status {
-        "ok" => "\x1b[32m✓\x1b[0m",
-        "warn" => "\x1b[33m!\x1b[0m",
-        "info" => "\x1b[36m>\x1b[0m",
-        _ => "",
+        "ok" => "✓".green().bold().to_string(),
+        "warn" => "!".yellow().bold().to_string(),
+        "info" => ">".cyan().bold().to_string(),
+        _ => String::new(),
     }
 }
 
 fn color_amount(amount: &'static str) -> String {
-    format!("\x1b[1;33m{amount}\x1b[0m")
+    amount.yellow().bold().to_string()
 }
 
 /// Checks that the configured secret matches the proxy-provided challenge hash.

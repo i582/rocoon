@@ -14,11 +14,14 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use serde::Deserialize;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
 
 use crate::wallet;
 
-const DEFAULT_CONFIG_PATH: &str = "rocoon.toml";
+pub const DEFAULT_CONFIG_PATH: &str = "rocoon.toml";
 const DEFAULT_PROXY_ADDR: &str = "91.108.4.11:8888";
 const DEFAULT_MAINNET_ROOT_CONTRACT_ADDRESS: &str =
     "EQCns7bYSp0igFvS1wpb5wsZjCKCV19MD5AVzI4EyxsnU73k";
@@ -79,7 +82,7 @@ pub struct TonRuntimeConfig {
 }
 
 /// TOML root object before validation and environment overrides.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct FileConfig {
     network: NetworkConfig,
@@ -90,7 +93,7 @@ struct FileConfig {
 }
 
 /// Network-related TOML section.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct NetworkConfig {
     proxy_addr: String,
@@ -98,24 +101,25 @@ struct NetworkConfig {
 }
 
 /// Local HTTP server TOML section.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct ServerConfig {
     listen_addr: String,
 }
 
 /// Cocoon client identity and authorization TOML section.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct ClientConfig {
     owner_address: String,
     node_wallet_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     secret: Option<String>,
     min_config_version: i32,
 }
 
 /// Per-request default limits used by the HTTP layer.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct RequestConfig {
     max_coefficient: i32,
@@ -124,16 +128,62 @@ struct RequestConfig {
 }
 
 /// TON liteclient TOML section.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct TonConfig {
     mainnet: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     config_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     root_contract_address: Option<String>,
     query_timeout_millis: u64,
 }
 
 impl RuntimeConfig {
+    /// Default config path used when `--config` is not provided.
+    #[must_use]
+    pub fn default_config_path() -> PathBuf {
+        PathBuf::from(DEFAULT_CONFIG_PATH)
+    }
+
+    /// Generates a fresh base64-encoded 32-byte Cocoon wallet seed.
+    #[must_use]
+    pub fn generate_node_wallet_key_base64() -> String {
+        let mut seed = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut seed);
+        STANDARD.encode(seed)
+    }
+
+    /// Validates an external owner wallet address before writing a generated config.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `address` is not a valid TON address.
+    pub fn validate_owner_address(address: &str) -> Result<()> {
+        ton_core::types::TonAddress::from_str(address)
+            .context("parse client.owner_address as TON address")?;
+        Ok(())
+    }
+
+    /// Writes a default config file with the provided owner address and wallet key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization fails or the file cannot be written.
+    pub fn write_default_config(
+        path: &Path,
+        owner_address: &str,
+        node_wallet_key: &str,
+    ) -> Result<()> {
+        let config = default_file_config(owner_address, node_wallet_key);
+        let data = toml::to_string_pretty(&config).context("serialize default rocoon config")?;
+        if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("create config directory {}", parent.display()))?;
+        }
+        fs::write(path, data).with_context(|| format!("write {}", path.display()))
+    }
+
     /// Loads configuration using CLI-selected options.
     ///
     /// # Errors
@@ -156,6 +206,7 @@ impl RuntimeConfig {
         let mut config = read_config(&config_path, explicit_config_path)?;
         apply_env_overrides(&mut config)?;
         validate(&config)?;
+        Self::validate_owner_address(&config.client.owner_address)?;
         let owner_address = ton_core::types::TonAddress::from_str(&config.client.owner_address)
             .context("parse client.owner_address as TON address")?;
         let node_wallet_key = NodeWalletKey(
@@ -254,6 +305,18 @@ impl Default for TonConfig {
             root_contract_address: None,
             query_timeout_millis: DEFAULT_TON_QUERY_TIMEOUT_MILLIS,
         }
+    }
+}
+
+fn default_file_config(owner_address: &str, node_wallet_key: &str) -> FileConfig {
+    FileConfig {
+        client: ClientConfig {
+            owner_address: owner_address.to_string(),
+            node_wallet_key: node_wallet_key.to_string(),
+            secret: Some(String::new()),
+            min_config_version: 0,
+        },
+        ..FileConfig::default()
     }
 }
 
@@ -432,7 +495,7 @@ fn validate(config: &FileConfig) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_path_relative_to_config;
+    use super::{FileConfig, RuntimeConfig, default_file_config, resolve_path_relative_to_config};
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -455,5 +518,19 @@ mod tests {
             resolve_path_relative_to_config(path.clone(), Path::new("/tmp/rocoon/rocoon.toml"));
 
         assert_eq!(resolved, path);
+    }
+
+    #[test]
+    fn generated_default_config_round_trips() {
+        let owner_address = "UQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJKZ";
+        let node_wallet_key = RuntimeConfig::generate_node_wallet_key_base64();
+        let config = default_file_config(owner_address, &node_wallet_key);
+        let data = toml::to_string_pretty(&config).expect("default config should serialize");
+        let parsed: FileConfig = toml::from_str(&data).expect("default config should parse");
+
+        assert_eq!(parsed.client.owner_address, owner_address);
+        assert_eq!(parsed.client.node_wallet_key, node_wallet_key);
+        assert_eq!(parsed.network.proxy_addr, "91.108.4.11:8888");
+        assert!(parsed.ton.mainnet);
     }
 }

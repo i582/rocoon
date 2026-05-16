@@ -50,6 +50,13 @@ Run:
 rocoon start
 ```
 
+On first run, if `rocoon.toml` is missing and no owner/key environment
+override is set, `rocoon start` asks for your external TON wallet address,
+writes a default config, and continues startup. Initial Cocoon setup requires
+funding the derived Cocoon wallet with 20 TON. Those funds can be withdrawn
+later; total TON network fees for the setup/withdraw flow are usually around 1
+TON.
+
 Checks:
 
 ```bash

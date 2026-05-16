@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 ed25519-dalek.workspace = true
+inquire.workspace = true
 rand.workspace = true
 rocoon-config = { workspace = true }
 rocoon-protocol = { workspace = true }

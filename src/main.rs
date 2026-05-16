@@ -1,3 +1,4 @@
+use std::env;
 use std::error::Error;
 use std::fmt;
 use std::fs;
@@ -7,6 +8,8 @@ use std::process;
 
 use anyhow::{Context, Result};
 use clap::{ColorChoice, CommandFactory, Parser, Subcommand};
+use inquire::Text;
+use inquire::validator::{ErrorMessage, Validation};
 use rocoon_client::{
     COCOON_WALLET_RESERVE_NANOTONS, CocoonClient, is_client_contract_closed_or_closing_error,
 };
@@ -107,6 +110,10 @@ fn run() -> Result<()> {
         return Ok(());
     };
 
+    if matches!(command, Command::Start) && should_run_initial_setup(config.as_deref()) {
+        run_initial_setup(&RuntimeConfig::default_config_path())?;
+    }
+
     let config = RuntimeConfig::load_cli(config, verbose)?;
     if config.verbose {
         println!("config: {}", config.config_path.display());
@@ -180,6 +187,80 @@ fn print_closed_client_contract_error(error: &ClosedClientContractStartError) {
     );
 }
 
+fn should_run_initial_setup(config_path: Option<&Path>) -> bool {
+    config_path.is_none()
+        && !RuntimeConfig::default_config_path().exists()
+        && !has_complete_env_config()
+}
+
+fn has_complete_env_config() -> bool {
+    env_value_present("COCOON_OWNER_ADDRESS") && env_value_present("COCOON_NODE_WALLET_KEY")
+}
+
+fn env_value_present(name: &str) -> bool {
+    env::var(name).is_ok_and(|value| !value.trim().is_empty())
+}
+
+fn run_initial_setup(config_path: &Path) -> Result<()> {
+    print_initial_setup_welcome(config_path);
+    let owner_address = prompt_owner_address()?;
+    let node_wallet_key = RuntimeConfig::generate_node_wallet_key_base64();
+    RuntimeConfig::write_default_config(config_path, &owner_address, &node_wallet_key)?;
+    println!(
+        "{} Created {}",
+        "✓".green().bold(),
+        config_path.display().to_string().cyan().bold()
+    );
+    Ok(())
+}
+
+fn print_initial_setup_welcome(config_path: &Path) {
+    println!("{}", "Welcome to rocoon!".green().bold());
+    println!(
+        "No {} found in this directory.",
+        config_path.display().to_string().cyan().bold()
+    );
+    println!();
+    println!(
+        "Initial setup needs a Cocoon wallet funded with {}.",
+        "20 TON".cyan().bold()
+    );
+    println!(
+        "You can withdraw the funds later with {}; total TON fees are usually around {}.",
+        "rocoon withdraw".cyan().bold(),
+        "1 TON".cyan().bold()
+    );
+    println!();
+    println!(
+        "Enter your own TON wallet address, rocoon will create {} and continue.",
+        config_path.display().to_string().cyan().bold()
+    );
+}
+
+fn prompt_owner_address() -> Result<String> {
+    let owner_address = Text::new("Owner wallet address:")
+        .with_validator(|input: &str| {
+            let input = input.trim();
+            if input.is_empty() {
+                return Ok(Validation::Invalid(ErrorMessage::Custom(
+                    "Enter your own TON wallet address".to_string(),
+                )));
+            }
+            if RuntimeConfig::validate_owner_address(input).is_ok() {
+                Ok(Validation::Valid)
+            } else {
+                Ok(Validation::Invalid(ErrorMessage::Custom(
+                    "Enter a valid TON address".to_string(),
+                )))
+            }
+        })
+        .prompt()
+        .context("read owner wallet address")?;
+    let owner_address = owner_address.trim().to_string();
+    RuntimeConfig::validate_owner_address(&owner_address)?;
+    Ok(owner_address)
+}
+
 fn serve_http(config: &RuntimeConfig) -> Result<()> {
     fail_if_cached_client_contract_is_closed(config)?;
     let client = match CocoonClient::connect_interactive(config) {
@@ -209,7 +290,7 @@ fn request_withdraw(config: &RuntimeConfig, client_contract: Option<&str>) -> Re
         &result.client_contract_address,
         ClientContractStatus::Active,
     );
-    println!("✓ Withdraw request sent");
+    println!("{} Withdraw request sent", "✓".green().bold());
     println!("Client contract: {}", result.client_contract_address);
     println!("Wallet seqno: {}", result.wallet_seqno);
     println!(
@@ -227,7 +308,7 @@ fn request_close(config: &RuntimeConfig, client_contract: Option<&str>) -> Resul
         &result.client_contract_address,
         ClientContractStatus::CloseRequested,
     );
-    println!("✓ Close request sent");
+    println!("{} Close request sent", "✓".green().bold());
     println!("Client contract: {}", result.client_contract_address);
     println!("Wallet seqno: {}", result.wallet_seqno);
     println!(
@@ -253,7 +334,7 @@ fn sweep_wallet(
     if let Some(client_contract) = client_contract {
         remember_client_contract(config, client_contract, ClientContractStatus::Closed);
     }
-    println!("✓ Wallet withdraw sent");
+    println!("{} Wallet withdraw sent", "✓".green().bold());
     println!("Wallet: {}", result.wallet_address);
     println!("Destination: {}", result.destination_address);
     println!("Amount: {} TON", format_nanotons_as_ton(result.amount));
@@ -432,7 +513,8 @@ fn remember_client_contract(
 fn cached_client_contract(config: &RuntimeConfig) -> Option<String> {
     let state = read_matching_state(config, true)?;
     println!(
-        "> Using cached client contract {}",
+        "{} Using cached client contract {}",
+        ">".cyan().bold(),
         state.client_contract_address
     );
     Some(state.client_contract_address)
