@@ -17,6 +17,8 @@ Current scope:
 - Implement `/v1/models` through `client.getWorkerTypesV2`.
 - Implement `/v1/chat/completions` and `/v1/completions` through `client.runQueryEx`.
 - Collect streamed Cocoon answer parts before returning the local HTTP response.
+- Emulate OpenAI SSE responses for `/v1/chat/completions` and `/v1/completions`
+  when clients pass `"stream": true`.
 - Expose local runtime statistics through `/stats`, `/jsonstats`, and `/v1/stats`.
 - Read Cocoon wallet/client-contract state and root registered proxies from TON liteservers.
 - Send owner control transactions through the Cocoon wallet with CLI commands.
@@ -42,7 +44,8 @@ Not implemented yet:
 
 - Automatic proxy selection from the root contract proxy list.
 - RA-TLS/TEE quote verification.
-- True local HTTP streaming; streamed Cocoon chunks are aggregated before the local response is sent.
+- True low-latency local HTTP streaming; Cocoon/model chunks are still
+  aggregated before any local response body is sent.
 
 Run:
 

@@ -116,7 +116,7 @@ pub fn json_response(
     response_with_body(status_code, headers, body)
 }
 
-fn response_with_body(
+pub fn response_with_body(
     status_code: StatusCode,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
