@@ -250,8 +250,15 @@ impl CocoonClient {
                     let Some(action) = wallet_funding_required_from_error(&error) else {
                         return Err(error);
                     };
-                    print_actionable_balance_error(action);
-                    wait_for_enter("Fund the wallet and press Enter to retry: ")?;
+
+                    println!();
+                    println!("{} Cocoon wallet needs funding", "!".yellow().bold());
+                    println!("Address: {}", action.wallet_address);
+                    println!("Current: {} TON", format_nanotons(action.current_balance));
+                    println!("Required: {} TON", format_nanotons(action.required_balance));
+                    println!("Missing: {} TON", format_nanotons(action.missing_balance));
+
+                    wait_for_enter("Fund the wallet and press Enter to retry...")?;
                 }
             }
         }
@@ -494,7 +501,10 @@ impl CocoonClient {
         // encrypted. The zero key preserves that wire shape.
         options.public_key = (self.proto_version >= 3).then_some([0u8; 32]);
 
-        let headers = json_request_headers(body.len());
+        let headers = vec![
+            ("Content-Type", "application/json".to_string()),
+            ("Content-Length", body.len().to_string()),
+        ];
         let http_request = cocoon::encode_http_request("POST", path, &headers, body);
         let output = match self
             .session
@@ -1147,17 +1157,6 @@ fn random_interval(min_secs: f64, max_secs: f64) -> Duration {
     Duration::from_secs_f64(rand::thread_rng().gen_range(min_secs..max_secs))
 }
 
-/// Minimal HTTP headers required by Cocoon's internal HTTP request wrapper.
-///
-/// User-agent, auth, and other local UI headers are intentionally not forwarded
-/// because the Cocoon worker only needs the JSON payload and its length.
-fn json_request_headers(body_len: usize) -> Vec<(&'static str, String)> {
-    vec![
-        ("Content-Type", "application/json".to_string()),
-        ("Content-Length", body_len.to_string()),
-    ]
-}
-
 /// Data collected while authenticating a Cocoon proxy session.
 struct AuthorizationInfo {
     proto_version: i32,
@@ -1316,7 +1315,7 @@ fn authorize(
     let payment_status = match connected_to_proxy.auth {
         ProxyAuthInfo::Short { secret_hash, nonce } => {
             if let Some(secret) = config.client_secret.as_deref()
-                && secret_hash_matches(secret, &secret_hash)
+                && (secret_hash_bytes(secret) == secret_hash)
             {
                 authorize_short(session, secret, verbose)?
             } else {
@@ -1612,19 +1611,26 @@ fn wait_for_long_auth_funding(config: &RuntimeConfig) -> Result<()> {
     println!("Address: {}", config.cocoon_wallet_address);
     println!(
         "Deposit {} to this address, then continue.",
-        color_amount("20 TON")
+        "20 TON".yellow().bold().to_string()
     );
     wait_for_enter("Press Enter after funding...")?;
 
     loop {
         match read_interactive_wallet_balance(config) {
             Ok(balance) if balance < INTERACTIVE_REQUIRED_WALLET_BALANCE_NANOTONS => {
-                print_wallet_balance_problem(
-                    &config.cocoon_wallet_address,
-                    balance,
-                    INTERACTIVE_REQUIRED_WALLET_BALANCE_NANOTONS,
+                let wallet_address = &config.cocoon_wallet_address;
+                let missing = INTERACTIVE_REQUIRED_WALLET_BALANCE_NANOTONS.saturating_sub(balance);
+
+                println!();
+                println!("{} Cocoon wallet needs funding", "!".yellow().bold());
+                println!("Address: {wallet_address}");
+                println!("Current: {} TON", format_nanotons(balance));
+                println!(
+                    "Required: {} TON",
+                    format_nanotons(INTERACTIVE_REQUIRED_WALLET_BALANCE_NANOTONS)
                 );
-                wait_for_enter("Fund the wallet and press Enter: ")?;
+                println!("Missing: {} TON", format_nanotons(missing));
+                wait_for_enter("Fund the wallet and press Enter...")?;
             }
             Ok(balance) => {
                 println!(
@@ -1665,16 +1671,6 @@ fn wait_for_enter(prompt: &str) -> Result<()> {
     Ok(())
 }
 
-fn print_wallet_balance_problem(wallet_address: &str, current: u64, required: u64) {
-    let missing = required.saturating_sub(current);
-    println!();
-    println!("{} Cocoon wallet needs funding", "!".yellow().bold());
-    println!("Address: {wallet_address}");
-    println!("Current: {} TON", format_nanotons(current));
-    println!("Required: {} TON", format_nanotons(required));
-    println!("Missing: {} TON", format_nanotons(missing));
-}
-
 fn wallet_funding_required_from_error(
     error: &anyhow::Error,
 ) -> Option<&CocoonWalletFundingRequired> {
@@ -1683,28 +1679,10 @@ fn wallet_funding_required_from_error(
         .find_map(|cause| cause.downcast_ref::<CocoonWalletFundingRequired>())
 }
 
-fn print_actionable_balance_error(error: &CocoonWalletFundingRequired) {
-    println!();
-    println!("{} Cocoon wallet needs funding", "!".yellow().bold());
-    println!("Address: {}", error.wallet_address);
-    println!("Current: {} TON", format_nanotons(error.current_balance));
-    println!("Required: {} TON", format_nanotons(error.required_balance));
-    println!("Missing: {} TON", format_nanotons(error.missing_balance));
-}
-
 fn format_nanotons(value: u64) -> String {
     let whole = value / NANOTONS_PER_TON;
     let fraction = value % NANOTONS_PER_TON;
     format!("{whole}.{fraction:09}")
-}
-
-fn color_amount(amount: &'static str) -> String {
-    amount.yellow().bold().to_string()
-}
-
-/// Checks that the configured secret matches the proxy-provided challenge hash.
-fn secret_hash_matches(secret: &str, expected: &[u8; 32]) -> bool {
-    secret_hash_bytes(secret) == *expected
 }
 
 fn secret_hash_bytes(secret: &str) -> [u8; 32] {
