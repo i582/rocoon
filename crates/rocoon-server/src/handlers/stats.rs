@@ -1,19 +1,13 @@
 use crate::ServerState;
-use crate::http::{Error as HttpError, ServerResponse, json_response};
+use crate::http::{HandlerResult, Json};
+use crate::stats::StatsResponse;
 
 /// Handles `GET /stats`, `GET /jsonstats`, and `GET /v1/stats`.
-pub fn handle(state: &ServerState) -> std::result::Result<ServerResponse, HttpError> {
-    let client_status = state
-        .client
-        .lock()
-        .map_err(|_| HttpError::message(500, "Cocoon client mutex poisoned"))?
-        .status();
+pub fn handle(state: &ServerState) -> HandlerResult<Json<StatsResponse>> {
+    let client_status = state.client()?.status();
     let stats_response = {
-        let server_stats = state
-            .stats
-            .lock()
-            .map_err(|_| HttpError::message(500, "stats mutex poisoned"))?;
+        let server_stats = state.stats()?;
         server_stats.to_response(&client_status)
     };
-    json_response(200, &stats_response, Vec::new()).map_err(|error| HttpError::new(500, &error))
+    Ok(Json::ok(stats_response))
 }

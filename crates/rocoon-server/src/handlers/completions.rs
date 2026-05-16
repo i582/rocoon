@@ -1,9 +1,9 @@
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::Context;
 use serde_json::{Map, Value};
 
-use crate::http::{Error as HttpError, ServerResponse, upstream_response};
+use crate::http::{HandlerResult, Upstream, bad_gateway, bad_request};
 use crate::stats::{CompletionFailure, CompletionSuccess};
 use crate::{Defaults, ServerState};
 
@@ -22,59 +22,43 @@ pub fn handle(
     defaults: Defaults,
     path: &str,
     body: &[u8],
-) -> std::result::Result<ServerResponse, HttpError> {
-    let completion = parse_request(body, defaults).map_err(|error| HttpError::new(400, &error))?;
-    state
-        .stats
-        .lock()
-        .map_err(|_| HttpError::message(500, "stats mutex poisoned"))?
-        .record_completion_started();
+) -> HandlerResult<Upstream> {
+    let completion = parse_request(body, defaults).map_err(bad_request)?;
+    state.stats()?.record_completion_started();
     let started_at = Instant::now();
-    let response = state
-        .client
-        .lock()
-        .map_err(|_| HttpError::message(500, "Cocoon client mutex poisoned"))?
-        .run_chat_completion(
-            &completion.model,
-            path,
-            &completion.body,
-            completion.max_coefficient,
-            completion.max_tokens,
-            completion.timeout,
-        );
+    let response = state.client()?.run_chat_completion(
+        &completion.model,
+        path,
+        &completion.body,
+        completion.max_coefficient,
+        completion.max_tokens,
+        completion.timeout,
+    );
     let duration = started_at.elapsed();
     let response = match response {
         Ok(response) => {
-            state
-                .stats
-                .lock()
-                .map_err(|_| HttpError::message(500, "stats mutex poisoned"))?
-                .record_completion_success(CompletionSuccess {
-                    model: &completion.model,
-                    path,
-                    request_bytes: completion.body.len(),
-                    duration,
-                    response: &response,
-                });
+            state.stats()?.record_completion_success(CompletionSuccess {
+                model: &completion.model,
+                path,
+                request_bytes: completion.body.len(),
+                duration,
+                response: &response,
+            });
             response
         }
         Err(error) => {
             let message = format!("{error:#}");
-            state
-                .stats
-                .lock()
-                .map_err(|_| HttpError::message(500, "stats mutex poisoned"))?
-                .record_completion_failure(CompletionFailure {
-                    model: &completion.model,
-                    path,
-                    request_bytes: completion.body.len(),
-                    duration,
-                    error: &message,
-                });
-            return Err(HttpError::new(502, &error));
+            state.stats()?.record_completion_failure(CompletionFailure {
+                model: &completion.model,
+                path,
+                request_bytes: completion.body.len(),
+                duration,
+                error: &message,
+            });
+            return Err(bad_gateway(error));
         }
     };
-    upstream_response(response).map_err(|error| HttpError::new(500, &error))
+    Ok(Upstream(response))
 }
 
 /// Parses and sanitizes `OpenAI` completion JSON.
@@ -82,7 +66,7 @@ pub fn handle(
 /// The model name is extracted for Cocoon routing. `Cocoon`-specific knobs
 /// (`max_coefficient`, `timeout`) are removed from the forwarded JSON body,
 /// while token limits are normalized for worker compatibility.
-fn parse_request(body: &[u8], defaults: Defaults) -> Result<CompletionRequest> {
+fn parse_request(body: &[u8], defaults: Defaults) -> anyhow::Result<CompletionRequest> {
     let mut value: Value = serde_json::from_slice(body).context("parse OpenAI request JSON")?;
     let object = value
         .as_object_mut()

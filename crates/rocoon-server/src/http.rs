@@ -10,35 +10,66 @@ const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 const MAX_BODY_READ_LIMIT: u64 = 32 * 1024 * 1024 + 1;
 
 pub type ServerResponse = Response<Cursor<Vec<u8>>>;
+pub type HandlerError = (StatusCode, anyhow::Error);
+pub type HandlerResult<T> = std::result::Result<T, HandlerError>;
 
-/// HTTP error carrying enough context to build an OpenAI-compatible response.
-pub struct Error {
-    pub status_code: i32,
-    pub message: String,
+pub struct Json<T> {
+    status_code: StatusCode,
+    value: T,
 }
 
-impl Error {
-    /// Builds an error from an `anyhow::Error`.
-    pub fn new(status_code: i32, error: &anyhow::Error) -> Self {
-        Self {
-            status_code,
-            message: format!("{error:#}"),
-        }
+impl<T> Json<T> {
+    pub const fn new(status_code: StatusCode, value: T) -> Self {
+        Self { status_code, value }
     }
 
-    /// Builds an error from a static message.
-    pub fn message(status_code: i32, message: &str) -> Self {
-        Self {
-            status_code,
-            message: message.to_string(),
-        }
+    pub const fn ok(value: T) -> Self {
+        Self::new(StatusCode(200), value)
     }
 }
 
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
+pub struct Upstream(pub HttpExchange);
+
+pub trait IntoServerResponse {
+    fn into_server_response(self) -> Result<ServerResponse>;
+}
+
+impl<T> IntoServerResponse for Json<T>
+where
+    T: serde::Serialize,
+{
+    fn into_server_response(self) -> Result<ServerResponse> {
+        json_response(self.status_code, &self.value)
     }
+}
+
+impl IntoServerResponse for Upstream {
+    fn into_server_response(self) -> Result<ServerResponse> {
+        upstream_response(self.0)
+    }
+}
+
+pub fn finalize<T>(result: HandlerResult<T>) -> HandlerResult<ServerResponse>
+where
+    T: IntoServerResponse,
+{
+    result.and_then(|response| response.into_server_response().map_err(internal))
+}
+
+pub const fn bad_request(error: anyhow::Error) -> HandlerError {
+    (StatusCode(400), error)
+}
+
+pub const fn bad_gateway(error: anyhow::Error) -> HandlerError {
+    (StatusCode(502), error)
+}
+
+pub const fn internal(error: anyhow::Error) -> HandlerError {
+    (StatusCode(500), error)
+}
+
+pub fn internal_message(message: &'static str) -> HandlerError {
+    (StatusCode(500), anyhow::anyhow!(message))
 }
 
 pub fn read_body(request: &mut Request) -> Result<Vec<u8>> {
@@ -68,31 +99,30 @@ pub fn split_path_query(path: &str) -> (&str, &str) {
 }
 
 /// Converts a Cocoon worker HTTP response into a local response.
-pub fn upstream_response(response: HttpExchange) -> Result<ServerResponse> {
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn upstream_response(response: HttpExchange) -> Result<ServerResponse> {
     let headers = sanitized_response_headers(response.headers);
-    response_with_body(response.status_code, headers, response.payload)
+    let status_code = StatusCode(response.status_code as u16);
+    response_with_body(status_code, headers, response.payload)
 }
 
 /// Builds a JSON response with a generated HTTP status line and length.
 pub fn json_response(
-    status_code: i32,
+    status_code: StatusCode,
     value: &(impl serde::Serialize + ?Sized),
-    headers: Vec<(String, String)>,
 ) -> Result<ServerResponse> {
-    let mut headers = headers;
-    headers.push(("Content-Type".to_string(), "application/json".to_string()));
+    let headers = vec![("Content-Type".to_string(), "application/json".to_string())];
     let body = serde_json::to_vec(value).context("serialize JSON response")?;
     response_with_body(status_code, headers, body)
 }
 
 fn response_with_body(
-    status_code: i32,
+    status_code: StatusCode,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
 ) -> Result<ServerResponse> {
-    let status_code = u16::try_from(status_code).context("HTTP status code out of range")?;
     let mut response = Response::from_data(body)
-        .with_status_code(StatusCode(status_code))
+        .with_status_code(status_code)
         .with_chunked_threshold(usize::MAX);
     if !headers
         .iter()
