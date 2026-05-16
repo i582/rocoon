@@ -1,10 +1,9 @@
-use std::net::TcpStream;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 use serde_json::{Map, Value};
 
-use crate::http::{Error as HttpError, write_upstream_response};
+use crate::http::{Error as HttpError, ServerResponse, upstream_response};
 use crate::stats::{CompletionFailure, CompletionSuccess};
 use crate::{Defaults, ServerState};
 
@@ -19,26 +18,22 @@ struct CompletionRequest {
 
 /// Handles `POST /v1/chat/completions` and `POST /v1/completions`.
 pub fn handle(
-    stream: &mut TcpStream,
     state: &ServerState,
     defaults: Defaults,
     path: &str,
     body: &[u8],
-) -> std::result::Result<(), HttpError> {
-    let completion = parse_request(body, defaults)
-        .map_err(|error| HttpError::new(stream.try_clone().ok(), 400, &error))?;
+) -> std::result::Result<ServerResponse, HttpError> {
+    let completion = parse_request(body, defaults).map_err(|error| HttpError::new(400, &error))?;
     state
         .stats
         .lock()
-        .map_err(|_| HttpError::message(stream.try_clone().ok(), 500, "stats mutex poisoned"))?
+        .map_err(|_| HttpError::message(500, "stats mutex poisoned"))?
         .record_completion_started();
     let started_at = Instant::now();
     let response = state
         .client
         .lock()
-        .map_err(|_| {
-            HttpError::message(stream.try_clone().ok(), 500, "Cocoon client mutex poisoned")
-        })?
+        .map_err(|_| HttpError::message(500, "Cocoon client mutex poisoned"))?
         .run_chat_completion(
             &completion.model,
             path,
@@ -53,9 +48,7 @@ pub fn handle(
             state
                 .stats
                 .lock()
-                .map_err(|_| {
-                    HttpError::message(stream.try_clone().ok(), 500, "stats mutex poisoned")
-                })?
+                .map_err(|_| HttpError::message(500, "stats mutex poisoned"))?
                 .record_completion_success(CompletionSuccess {
                     model: &completion.model,
                     path,
@@ -70,9 +63,7 @@ pub fn handle(
             state
                 .stats
                 .lock()
-                .map_err(|_| {
-                    HttpError::message(stream.try_clone().ok(), 500, "stats mutex poisoned")
-                })?
+                .map_err(|_| HttpError::message(500, "stats mutex poisoned"))?
                 .record_completion_failure(CompletionFailure {
                     model: &completion.model,
                     path,
@@ -80,10 +71,10 @@ pub fn handle(
                     duration,
                     error: &message,
                 });
-            return Err(HttpError::new(stream.try_clone().ok(), 502, &error));
+            return Err(HttpError::new(502, &error));
         }
     };
-    write_upstream_response(stream, response).map_err(|error| HttpError::new(None, 500, &error))
+    upstream_response(response).map_err(|error| HttpError::new(500, &error))
 }
 
 /// Parses and sanitizes `OpenAI` completion JSON.
