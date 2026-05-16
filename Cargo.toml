@@ -86,3 +86,4 @@ inquire.workspace = true
 rocoon-client = { workspace = true }
 rocoon-config = { workspace = true }
 rocoon-server = { workspace = true }
+serde_json.workspace = true

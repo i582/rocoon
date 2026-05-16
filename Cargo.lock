@@ -2400,6 +2400,7 @@ dependencies = [
  "rocoon-client",
  "rocoon-config",
  "rocoon-server",
+ "serde_json",
 ]
 
 [[package]]

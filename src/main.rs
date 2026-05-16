@@ -58,6 +58,8 @@ enum Command {
     Start,
     /// Check the local OpenAI-compatible HTTP server.
     Health,
+    /// Show local OpenAI-compatible HTTP server stats.
+    Stats,
     /// Query models advertised by the Cocoon proxy.
     Models {
         #[command(subcommand)]
@@ -139,6 +141,10 @@ fn run() -> Result<()> {
         let listen_addr = RuntimeConfig::load_listen_addr_cli(config)?;
         return commands::health::run(&listen_addr, verbose);
     }
+    if matches!(command, Command::Stats) {
+        let listen_addr = RuntimeConfig::load_listen_addr_cli(config)?;
+        return commands::stats::run(&listen_addr, verbose);
+    }
 
     let config = RuntimeConfig::load_cli(config, verbose)?;
     if config.verbose {
@@ -148,6 +154,7 @@ fn run() -> Result<()> {
     match command {
         Command::Start => serve_http(&config),
         Command::Health => unreachable!("health is handled before full config loading"),
+        Command::Stats => unreachable!("stats is handled before full config loading"),
         Command::Models {
             command: ModelsCommand::List,
         } => commands::models::list(&config),
