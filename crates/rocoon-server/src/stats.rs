@@ -49,6 +49,21 @@ pub struct CompletionFailure<'a> {
 }
 
 impl ServerStats {
+    /// Builds a compact snapshot used by the CLI when the local server stops.
+    pub fn session_summary(&self, elapsed: Duration) -> SessionSummary {
+        SessionSummary {
+            elapsed,
+            completion_started: self.completion_requests_started,
+            completion_success: self.completion_requests_succeeded,
+            completion_failed: self.completion_requests_failed,
+            completion_in_flight: self.completion_requests_in_flight,
+            bytes_received: self.request_bytes_received,
+            bytes_sent: self.response_bytes_sent,
+            tokens: SessionTokens::from_openai_usage(self.openai_usage),
+            total_cost_ton_estimate: format_nanotons_as_ton(self.openai_usage.total_cost),
+        }
+    }
+
     /// Marks a completion request as in-flight.
     pub const fn record_completion_started(&mut self) {
         self.completion_requests_started = self.completion_requests_started.saturating_add(1);
@@ -182,6 +197,30 @@ impl ServerStats {
             last_request: self.last_request.as_ref().map(LastRequestResponse::from),
         }
     }
+}
+
+/// Short local server session summary returned after graceful shutdown.
+#[derive(Clone, Debug)]
+pub struct SessionSummary {
+    pub elapsed: Duration,
+    pub completion_started: u64,
+    pub completion_success: u64,
+    pub completion_failed: u64,
+    pub completion_in_flight: u64,
+    pub bytes_received: u64,
+    pub bytes_sent: u64,
+    pub tokens: SessionTokens,
+    pub total_cost_ton_estimate: String,
+}
+
+/// Token counters accumulated from OpenAI-compatible worker responses.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SessionTokens {
+    pub prompt: i64,
+    pub cached: i64,
+    pub completion: i64,
+    pub reasoning: i64,
+    pub total: i64,
 }
 
 /// Serialized `/stats` response.
@@ -397,6 +436,18 @@ impl OpenAiUsage {
             .completion_total_cost
             .saturating_add(other.completion_total_cost);
         self.total_cost = self.total_cost.saturating_add(other.total_cost);
+    }
+}
+
+impl SessionTokens {
+    const fn from_openai_usage(value: OpenAiUsage) -> Self {
+        Self {
+            prompt: value.prompt_tokens,
+            cached: value.cached_tokens,
+            completion: value.completion_tokens,
+            reasoning: value.reasoning_tokens,
+            total: value.total_tokens,
+        }
     }
 }
 

@@ -5,9 +5,12 @@
 //! into `CocoonClient` calls, and a mutex keeps the single Cocoon session from
 //! interleaving bytes on the proxy connection.
 
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{
+    Arc, Mutex, MutexGuard,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use rocoon_client::CocoonClient;
@@ -23,8 +26,10 @@ use http::{
     json_response, read_body, split_path_query,
 };
 use stats::ServerStats;
+pub use stats::SessionSummary;
 
 const MAINTENANCE_TICK_INTERVAL: Duration = Duration::from_secs(1);
+const HTTP_ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 /// Default per-request limits used when an HTTP request omits them.
 #[derive(Clone, Copy)]
@@ -57,7 +62,7 @@ impl ServerState {
     }
 }
 
-/// Serves the local OpenAI-compatible API forever.
+/// Serves the local OpenAI-compatible API until shutdown is requested.
 ///
 /// Supported endpoints are `/health`, `/stats`, `/jsonstats`, `/v1/stats`,
 /// `/v1/models`, `/v1/chat/completions`, and `/v1/completions`. Each request is
@@ -68,30 +73,50 @@ impl ServerState {
 ///
 /// Returns an error if the listener cannot bind or an incoming TCP connection
 /// cannot be accepted. Per-request failures are converted to JSON HTTP errors
-/// and do not stop the listener.
-pub fn serve(listen_addr: &str, client: CocoonClient, defaults: Defaults) -> Result<()> {
+/// and do not stop the listener. On graceful shutdown returns a session summary.
+pub fn serve(
+    listen_addr: &str,
+    client: CocoonClient,
+    defaults: Defaults,
+    shutdown_requested: &Arc<AtomicBool>,
+) -> Result<SessionSummary> {
     let server = tiny_http::Server::http(listen_addr)
         .map_err(|error| anyhow::anyhow!("bind {listen_addr}: {error}"))?;
+    let started_at = Instant::now();
     println!("OpenAI-compatible HTTP server listening on http://{listen_addr}");
 
     let state = Arc::new(ServerState {
         client: Mutex::new(client),
         stats: Mutex::new(ServerStats::default()),
     });
-    spawn_maintenance_thread(Arc::clone(&state));
-    loop {
-        let request = server.recv().context("accept HTTP request")?;
+    spawn_maintenance_thread(Arc::clone(&state), Arc::clone(shutdown_requested));
+    while !shutdown_requested.load(Ordering::SeqCst) {
+        let Some(request) = server
+            .recv_timeout(HTTP_ACCEPT_POLL_INTERVAL)
+            .context("accept HTTP request")?
+        else {
+            continue;
+        };
         let state = Arc::clone(&state);
         thread::spawn(move || {
             handle_request(request, &state, defaults);
         });
     }
+
+    let stats_guard = state
+        .stats
+        .lock()
+        .map_err(|_| anyhow::anyhow!("stats mutex poisoned"))?;
+    Ok(stats_guard.session_summary(started_at.elapsed()))
 }
 
-fn spawn_maintenance_thread(state: Arc<ServerState>) {
+fn spawn_maintenance_thread(state: Arc<ServerState>, shutdown_requested: Arc<AtomicBool>) {
     thread::spawn(move || {
-        loop {
+        while !shutdown_requested.load(Ordering::SeqCst) {
             thread::sleep(MAINTENANCE_TICK_INTERVAL);
+            if shutdown_requested.load(Ordering::SeqCst) {
+                break;
+            }
             match state.client.lock() {
                 Ok(mut client) => client.maintenance_tick(),
                 Err(error) => {
