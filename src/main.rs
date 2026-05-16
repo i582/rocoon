@@ -11,8 +11,7 @@ use clap::{ColorChoice, CommandFactory, Parser, Subcommand};
 use inquire::Text;
 use inquire::validator::{ErrorMessage, Validation};
 use rocoon_client::{
-    COCOON_WALLET_RESERVE_NANOTONS, CocoonClient, ModelInfo,
-    is_client_contract_closed_or_closing_error,
+    COCOON_WALLET_RESERVE_NANOTONS, CocoonClient, is_client_contract_closed_or_closing_error,
 };
 use rocoon_config::{
     RuntimeConfig,
@@ -102,6 +101,12 @@ enum Command {
 enum ModelsCommand {
     /// List models advertised by the Cocoon proxy.
     List,
+    /// Show workers and capacity for one model.
+    Inspect {
+        /// Model id from `rocoon models list`.
+        #[arg(value_name = "MODEL")]
+        model: String,
+    },
 }
 
 fn main() {
@@ -145,7 +150,10 @@ fn run() -> Result<()> {
         Command::Health => unreachable!("health is handled before full config loading"),
         Command::Models {
             command: ModelsCommand::List,
-        } => list_models(&config),
+        } => commands::models::list(&config),
+        Command::Models {
+            command: ModelsCommand::Inspect { model },
+        } => commands::models::inspect(&config, &model),
         Command::RequestWithdraw { client_contract } => {
             request_withdraw(&config, client_contract.as_deref())
         }
@@ -296,17 +304,7 @@ fn serve_http(config: &RuntimeConfig) -> Result<()> {
     serve(&config.listen_addr, client, defaults)
 }
 
-fn list_models(config: &RuntimeConfig) -> Result<()> {
-    let mut client = connect_cocoon_interactive(config)?;
-    println!("{} Fetching models", ">".cyan().bold());
-    let models = client
-        .get_worker_types_v2()
-        .context("fetch Cocoon models")?;
-    print_models(&models);
-    Ok(())
-}
-
-fn connect_cocoon_interactive(config: &RuntimeConfig) -> Result<CocoonClient> {
+pub(crate) fn connect_cocoon_interactive(config: &RuntimeConfig) -> Result<CocoonClient> {
     fail_if_cached_client_contract_is_closed(config)?;
     let client = match CocoonClient::connect_interactive(config) {
         Ok(client) => client,
@@ -321,22 +319,6 @@ fn connect_cocoon_interactive(config: &RuntimeConfig) -> Result<CocoonClient> {
         ClientContractStatus::Active,
     );
     Ok(client)
-}
-
-fn print_models(models: &[ModelInfo]) {
-    if models.is_empty() {
-        println!("{} No models available", "✓".green().bold());
-        return;
-    }
-
-    println!(
-        "{} Available models: {}",
-        "✓".green().bold(),
-        models.len().to_string().cyan().bold()
-    );
-    for model in models {
-        println!("{}", model.id.cyan().bold());
-    }
 }
 
 fn request_withdraw(config: &RuntimeConfig, client_contract: Option<&str>) -> Result<()> {
