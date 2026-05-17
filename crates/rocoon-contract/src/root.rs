@@ -1,4 +1,8 @@
 //! TLB-backed types for the Cocoon root contract.
+//!
+//! Sources:
+//! - `contracts_tolk/storage.tolk`
+//! - `contracts/utils.fc`
 
 use std::collections::HashMap;
 
@@ -15,7 +19,11 @@ use ton::ton_core::types::tlb_core::adapters::ConstLen;
 
 /// Storage cell for `cocoon_root.fc`.
 ///
-/// Source representation:
+/// Sources:
+/// - `contracts_tolk/storage.tolk`
+/// - `contracts/utils.fc`
+///
+/// Contract layout:
 ///
 /// ```tolk
 /// struct RootStorage {
@@ -26,7 +34,7 @@ use ton::ton_core::types::tlb_core::adapters::ConstLen;
 /// }
 /// ```
 ///
-/// `contracts/utils.fc` version 4 additionally stores:
+/// Additional `contracts/utils.fc` layout:
 ///
 /// ```func
 /// public_keys_manager_data: ref cell
@@ -48,7 +56,11 @@ pub struct CocoonRootStorage {
 
 /// Data ref stored inside [`CocoonRootStorage`].
 ///
-/// Source representation:
+/// Sources:
+/// - `contracts_tolk/storage.tolk`
+/// - `contracts/utils.fc`
+///
+/// Contract layout:
 ///
 /// ```tolk
 /// struct RootData {
@@ -81,7 +93,9 @@ pub struct CocoonRootData {
 
 /// Empty dictionary value used by contract dictionaries that act as sets.
 ///
-/// Source representation:
+/// Source: `contracts/utils.fc`.
+///
+/// Contract layout:
 ///
 /// ```func
 /// proxy_hashes~udict_set(256, proxy_hash, "");
@@ -110,7 +124,9 @@ impl TLB for EmptyDictValue {
 
 /// Network address value stored in the root contract registered proxy dict.
 ///
-/// Source representation:
+/// Source: `contracts/utils.fc`.
+///
+/// Contract layout:
 ///
 /// ```func
 /// store_uint(0, 1)

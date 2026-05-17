@@ -1,4 +1,8 @@
 //! TLB-backed types and builders for the Cocoon wallet contract.
+//!
+//! Sources:
+//! - `contracts/cocoon_wallet.fc`
+//! - `contracts_tolk/storage.tolk`
 
 use ton::block_tlb::StateInit;
 use ton::ton_core::TLB;
@@ -9,8 +13,7 @@ use ton::ton_core::types::TonAddress;
 use ton::ton_core::types::tlb_core::TLBRef;
 use ton::ton_core::types::tlb_core::adapters::ConstLen;
 
-/// Source contract: `contracts/cocoon_wallet.fc` /
-/// `contracts_tolk/cocoon_wallet.tolk`.
+/// Source: `contracts/cocoon_wallet.fc`.
 pub const COCOON_WALLET_CODE_BOC_HEX: &str = concat!(
     "b5ee9c724102110100024b000114ff00f4a413f4bcf2c80b010201200210020148030b0202ca040a020120050701f5d3b68bb7edb088831c",
     "02456f8007434c0c05c6c2456f83e900c0074c7c86084095964d32e88a08431669f34eeac48a084268491f02eac6497c0f83b513434c7f4c",
@@ -27,8 +30,7 @@ pub const COCOON_WALLET_CODE_BOC_HEX: &str = concat!(
 
 /// Parses the Cocoon wallet contract code cell.
 ///
-/// Source contract: `contracts/cocoon_wallet.fc` /
-/// `contracts_tolk/cocoon_wallet.tolk`.
+/// Source: `contracts/cocoon_wallet.fc`.
 ///
 /// # Errors
 ///
@@ -39,7 +41,9 @@ pub fn cocoon_wallet_code() -> Result<TonCell, TonCoreError> {
 
 /// Builds the Cocoon wallet data cell from owner address and public key.
 ///
-/// Source representation:
+/// Source: `contracts_tolk/storage.tolk`.
+///
+/// Contract layout:
 ///
 /// ```tolk
 /// struct WalletStorage {
@@ -64,7 +68,9 @@ pub fn cocoon_wallet_init_data_cell(
 
 /// Builds Cocoon wallet `StateInit` from owner address and public key.
 ///
-/// Source representation:
+/// Source: `contracts/cocoon_wallet.fc`.
+///
+/// Contract layout:
 ///
 /// ```tlb
 /// StateInit {
@@ -88,7 +94,9 @@ pub fn cocoon_wallet_state_init(
 
 /// Builds the signed body accepted by the Cocoon wallet.
 ///
-/// Source representation:
+/// Source: `contracts/cocoon_wallet.fc`.
+///
+/// Contract layout:
 ///
 /// ```tolk
 /// signature: bits512
@@ -116,7 +124,9 @@ pub fn cocoon_wallet_signed_body(
 
 /// Data cell stored by the Cocoon wallet contract.
 ///
-/// Source representation:
+/// Source: `contracts_tolk/storage.tolk`.
+///
+/// Contract layout:
 ///
 /// ```tolk
 /// struct WalletStorage {
@@ -167,7 +177,9 @@ impl CocoonWalletData {
 
 /// Unsigned body signed by the Cocoon wallet owner key.
 ///
-/// Source representation:
+/// Source: `contracts/cocoon_wallet.fc`.
+///
+/// Contract layout:
 ///
 /// ```tolk
 /// struct ExternalSignedMessage {

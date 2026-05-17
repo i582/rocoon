@@ -1,12 +1,21 @@
 //! TLB-backed types for the Cocoon client contract.
+//!
+//! Sources:
+//! - `contracts_tolk/messages.tolk`
+//! - `contracts_tolk/storage.tolk`
+//! - `contracts/utils.fc`
 
+use ton::block_tlb::StateInit;
 use ton::ton_core::TLB;
 use ton::ton_core::cell::{TonCell, TonHash};
+use ton::ton_core::traits::tlb::TLB;
 use ton::ton_core::types::TonAddress;
 use ton::ton_core::types::tlb_core::adapters::ConstLen;
 use ton::ton_core::types::tlb_core::{TLBCoins, TLBRef};
 
-/// Source representation:
+/// Source: `contracts_tolk/messages.tolk`.
+///
+/// Contract layout:
 ///
 /// ```tolk
 /// struct (0xda068e78) OwnerClientWithdraw {
@@ -16,7 +25,9 @@ use ton::ton_core::types::tlb_core::{TLBCoins, TLBRef};
 /// ```
 pub const OWNER_CLIENT_WITHDRAW: u32 = 0xda06_8e78;
 
-/// Source representation:
+/// Source: `contracts_tolk/messages.tolk`.
+///
+/// Contract layout:
 ///
 /// ```tolk
 /// struct (0xfafa6cc1) OwnerClientRequestRefund {
@@ -26,9 +37,50 @@ pub const OWNER_CLIENT_WITHDRAW: u32 = 0xda06_8e78;
 /// ```
 pub const OWNER_CLIENT_REQUEST_REFUND: u32 = 0xfafa_6cc1;
 
+/// Source: `contracts_tolk/messages.tolk`.
+///
+/// Contract layout:
+///
+/// ```tolk
+/// struct (0xc45f9f3b) OwnerClientRegister {
+///     queryId: uint64
+///     nonce: uint64
+///     sendExcessesTo: address
+/// }
+/// ```
+pub const OWNER_CLIENT_REGISTER: u32 = 0xc45f_9f3b;
+
+/// Source: `contracts_tolk/messages.tolk`.
+///
+/// Contract layout:
+///
+/// ```tolk
+/// struct (0xa9357034) OwnerClientChangeSecretHash {
+///     queryId: uint64
+///     newSecretHash: uint256
+///     sendExcessesTo: address
+/// }
+/// ```
+pub const OWNER_CLIENT_CHANGE_SECRET_HASH: u32 = 0xa935_7034;
+
+/// Source: `contracts_tolk/messages.tolk`.
+///
+/// Contract layout:
+///
+/// ```tolk
+/// struct (0xf172e6c2) ExtClientTopUp {
+///     queryId: uint64
+///     topUpAmount: coins
+///     sendExcessesTo: address
+/// }
+/// ```
+pub const EXT_CLIENT_TOP_UP: u32 = 0xf172_e6c2;
+
 /// Control action encoded into a Cocoon client-contract body.
 ///
-/// Source representation:
+/// Source: `contracts_tolk/messages.tolk`.
+///
+/// Contract layout:
 ///
 /// ```tolk
 /// struct (0xda068e78) OwnerClientWithdraw {
@@ -61,7 +113,9 @@ impl CocoonClientControlAction {
 
 /// Body forwarded from the Cocoon wallet into the client contract.
 ///
-/// Source representation:
+/// Source: `contracts_tolk/messages.tolk`.
+///
+/// Contract layout:
 ///
 /// ```tolk
 /// struct (0xda068e78) OwnerClientWithdraw {
@@ -101,9 +155,140 @@ impl CocoonClientControlBody {
     }
 }
 
+/// Body forwarded from the Cocoon wallet to register a client contract.
+///
+/// Source: `contracts_tolk/messages.tolk`.
+///
+/// Contract layout:
+///
+/// ```tolk
+/// struct (0xc45f9f3b) OwnerClientRegister {
+///     queryId: uint64
+///     nonce: uint64
+///     sendExcessesTo: address
+/// }
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq, TLB)]
+pub struct CocoonClientRegisterBody {
+    /// Smart-contract opcode.
+    #[tlb(bits_len = 32)]
+    pub opcode: u32,
+    /// Query id used by the sender for tracking.
+    #[tlb(bits_len = 64)]
+    pub query_id: u64,
+    /// Proxy-provided nonce.
+    #[tlb(bits_len = 64)]
+    pub nonce: u64,
+    /// Source field: `sendExcessesTo`; caller passes the Cocoon wallet address.
+    pub wallet_address: TonAddress,
+}
+
+impl CocoonClientRegisterBody {
+    /// Builds a client registration body.
+    #[must_use]
+    pub const fn new(query_id: u64, nonce: u64, wallet_address: TonAddress) -> Self {
+        Self {
+            opcode: OWNER_CLIENT_REGISTER,
+            query_id,
+            nonce,
+            wallet_address,
+        }
+    }
+}
+
+/// Body forwarded from the Cocoon wallet to update short-auth secret hash.
+///
+/// Source: `contracts_tolk/messages.tolk`.
+///
+/// Contract layout:
+///
+/// ```tolk
+/// struct (0xa9357034) OwnerClientChangeSecretHash {
+///     queryId: uint64
+///     newSecretHash: uint256
+///     sendExcessesTo: address
+/// }
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq, TLB)]
+pub struct CocoonClientSecretHashBody {
+    /// Smart-contract opcode.
+    #[tlb(bits_len = 32)]
+    pub opcode: u32,
+    /// Query id used by the sender for tracking.
+    #[tlb(bits_len = 64)]
+    pub query_id: u64,
+    /// Desired `sha256(secret)` value.
+    pub new_secret_hash: TonHash,
+    /// Source field: `sendExcessesTo`; caller passes the Cocoon wallet address.
+    pub wallet_address: TonAddress,
+}
+
+impl CocoonClientSecretHashBody {
+    /// Builds a client secret-hash update body.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `secret_hash` cannot be represented as a 256-bit
+    /// TON hash.
+    pub fn new(
+        query_id: u64,
+        secret_hash: &[u8; 32],
+        wallet_address: TonAddress,
+    ) -> Result<Self, ton::ton_core::errors::TonCoreError> {
+        Ok(Self {
+            opcode: OWNER_CLIENT_CHANGE_SECRET_HASH,
+            query_id,
+            new_secret_hash: TonHash::from_slice(secret_hash)?,
+            wallet_address,
+        })
+    }
+}
+
+/// Body sent directly to the client contract to increase request balance.
+///
+/// Source: `contracts_tolk/messages.tolk`.
+///
+/// Contract layout:
+///
+/// ```tolk
+/// struct (0xf172e6c2) ExtClientTopUp {
+///     queryId: uint64
+///     topUpAmount: coins
+///     sendExcessesTo: address
+/// }
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq, TLB)]
+pub struct CocoonClientTopUpBody {
+    /// Smart-contract opcode.
+    #[tlb(bits_len = 32)]
+    pub opcode: u32,
+    /// Query id used by the sender for tracking.
+    #[tlb(bits_len = 64)]
+    pub query_id: u64,
+    /// Amount added to the client request balance.
+    pub top_up_amount: TLBCoins,
+    /// Source field: `sendExcessesTo`; caller passes the Cocoon wallet address.
+    pub wallet_address: TonAddress,
+}
+
+impl CocoonClientTopUpBody {
+    /// Builds a client top-up body.
+    #[must_use]
+    pub fn new(query_id: u64, top_up_amount: u64, wallet_address: TonAddress) -> Self {
+        Self {
+            opcode: EXT_CLIENT_TOP_UP,
+            query_id,
+            top_up_amount: TLBCoins::new(u128::from(top_up_amount)),
+            wallet_address,
+        }
+    }
+}
+
 /// Data cell stored by the Cocoon client contract.
 ///
-/// Source representation:
+/// Source: `contracts_tolk/storage.tolk`.
+///
+/// Contract layout:
 ///
 /// ```tolk
 /// struct ClientStorage {
@@ -118,7 +303,9 @@ impl CocoonClientControlBody {
 /// }
 /// ```
 ///
-/// `contracts/utils.fc` stores the same layout as:
+/// Source: `contracts/utils.fc`.
+///
+/// Equivalent Func layout:
 ///
 /// ```func
 /// store_uint(state, 2)
@@ -155,7 +342,9 @@ pub struct CocoonClientContractData {
 
 /// Constant data ref stored by the Cocoon client contract.
 ///
-/// Source representation:
+/// Source: `contracts_tolk/storage.tolk`.
+///
+/// Contract layout:
 ///
 /// ```tolk
 /// struct ClientConstData {
@@ -172,6 +361,52 @@ pub struct CocoonClientConstData {
     pub proxy_address: TonAddress,
     /// Proxy Ed25519 public key.
     pub proxy_public_key: TonHash,
+}
+
+/// Builds client contract `StateInit` from root-provided code and params.
+///
+/// Source: `contracts/utils.fc`.
+///
+/// Contract layout:
+///
+/// ```tlb
+/// StateInit {
+///     code: clientScCode
+///     data: ClientStorage
+/// }
+/// ```
+///
+/// # Errors
+///
+/// Returns an error if the proxy public key cannot be encoded as a TON hash or
+/// the resulting client data cell cannot be built.
+pub fn cocoon_client_state_init(
+    client_sc_code: TonCell,
+    wallet_address: TonAddress,
+    proxy_contract_address: TonAddress,
+    proxy_public_key: &[u8; 32],
+    min_client_stake: u64,
+    client_params_cell: TonCell,
+) -> Result<StateInit, ton::ton_core::errors::TonCoreError> {
+    let zero_hash = TonHash::from_slice(&[0_u8; 32])?;
+    let data = CocoonClientContractData {
+        state: 0,
+        balance: TLBCoins::ZERO,
+        stake: TLBCoins::new(u128::from(min_client_stake)),
+        tokens_used: 0,
+        unlock_ts: 0,
+        secret_hash: zero_hash,
+        const_data: CocoonClientConstData {
+            owner_address: wallet_address,
+            proxy_address: proxy_contract_address,
+            proxy_public_key: TonHash::from_slice(proxy_public_key)?,
+        }
+        .into(),
+        params: client_params_cell.into(),
+    }
+    .to_cell()?;
+
+    Ok(StateInit::new(client_sc_code, data))
 }
 
 #[cfg(test)]
