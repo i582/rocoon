@@ -179,39 +179,38 @@ fn run() -> Result<()> {
         Command::Start => commands::start::run(&config),
         Command::Health => unreachable!("health is handled before full config loading"),
         Command::Stats => unreachable!("stats is handled before full config loading"),
-        Command::Models {
-            command: ModelsCommand::List,
-        } => commands::models::list(&config),
-        Command::Models {
-            command: ModelsCommand::Inspect { model },
-        } => commands::models::inspect(&config, &model),
+        Command::Models { command } => match command {
+            ModelsCommand::List => commands::models::list(&config),
+            ModelsCommand::Inspect { model } => commands::models::inspect(&config, &model),
+        },
         Command::RequestWithdraw { client_contract } => {
-            request_withdraw(&config, client_contract.as_deref())
+            commands::request_withdraw::run(&config, client_contract.as_deref())
         }
-        Command::Close { client_contract } => request_close(&config, client_contract.as_deref()),
+        Command::Close { client_contract } => {
+            commands::close::run(&config, client_contract.as_deref())
+        }
         Command::Withdraw {
             client_contract,
             to,
             reserve_nanotons,
         } => {
             let client_contract = client_contract.or_else(|| cached_client_contract(&config));
-            sweep_wallet(
+            commands::withdraw::run(
                 &config,
                 client_contract.as_deref(),
                 to.as_deref(),
                 reserve_nanotons,
             )
         }
-        Command::Proxies {
-            command: ProxiesCommand::List { root_contract },
-        } => commands::proxies::list(&config, root_contract.as_deref()),
-        Command::Proxies {
-            command:
-                ProxiesCommand::Inspect {
-                    proxy,
-                    root_contract,
-                },
-        } => commands::proxies::inspect(&config, &proxy, root_contract.as_deref()),
+        Command::Proxies { command } => match command {
+            ProxiesCommand::List { root_contract } => {
+                commands::proxies::list(&config, root_contract.as_deref())
+            }
+            ProxiesCommand::Inspect {
+                proxy,
+                root_contract,
+            } => commands::proxies::inspect(&config, &proxy, root_contract.as_deref()),
+        },
     }
 }
 
@@ -350,78 +349,6 @@ pub(crate) fn connect_cocoon_interactive(config: &RuntimeConfig) -> Result<Cocoo
         ClientContractStatus::Active,
     );
     Ok(client)
-}
-
-fn request_withdraw(config: &RuntimeConfig, client_contract: Option<&str>) -> Result<()> {
-    let result = CocoonClient::request_withdraw_interactive(config, client_contract)?;
-    remember_client_contract(
-        config,
-        &result.client_contract_address,
-        ClientContractStatus::Active,
-    );
-    println!("{} Withdraw request sent", "✓".green().bold());
-    println!("Client contract: {}", result.client_contract_address);
-    println!("Wallet seqno: {}", result.wallet_seqno);
-    println!(
-        "Attached: {} TON",
-        format_nanotons_as_ton(result.attached_value)
-    );
-    println!("Send status: {}", result.send_status);
-    Ok(())
-}
-
-fn request_close(config: &RuntimeConfig, client_contract: Option<&str>) -> Result<()> {
-    let result = CocoonClient::request_close_interactive(config, client_contract)?;
-    remember_client_contract(
-        config,
-        &result.client_contract_address,
-        ClientContractStatus::CloseRequested,
-    );
-    println!("{} Close request sent", "✓".green().bold());
-    println!("Client contract: {}", result.client_contract_address);
-    println!("Wallet seqno: {}", result.wallet_seqno);
-    println!(
-        "Attached: {} TON",
-        format_nanotons_as_ton(result.attached_value)
-    );
-    println!("Send status: {}", result.send_status);
-    Ok(())
-}
-
-fn sweep_wallet(
-    config: &RuntimeConfig,
-    client_contract: Option<&str>,
-    destination_address: Option<&str>,
-    reserve_nanotons: u64,
-) -> Result<()> {
-    let result = CocoonClient::sweep_cocoon_wallet_interactive(
-        config,
-        client_contract,
-        destination_address,
-        reserve_nanotons,
-    )?;
-    if let Some(client_contract) = client_contract {
-        remember_client_contract(config, client_contract, ClientContractStatus::Closed);
-    }
-    println!("{} Wallet withdraw sent", "✓".green().bold());
-    println!("Wallet: {}", result.wallet_address);
-    println!("Destination: {}", result.destination_address);
-    println!("Amount: {} TON", format_nanotons_as_ton(result.amount));
-    println!("Reserve: {} TON", format_nanotons_as_ton(reserve_nanotons));
-    println!("Wallet seqno: {}", result.wallet_seqno);
-    println!("Send status: {}", result.send_status);
-    Ok(())
-}
-
-fn format_nanotons_as_ton(amount: u64) -> String {
-    let whole = amount / NANOTONS_PER_TON;
-    let fractional = amount % NANOTONS_PER_TON;
-    if fractional == 0 {
-        return whole.to_string();
-    }
-    let fractional = format!("{fractional:09}");
-    let fractional = fractional.trim_end_matches('0');
-    format!("{whole}.{fractional}")
 }
 
 #[derive(Debug)]
