@@ -1,11 +1,12 @@
 [workspace]
 members = [
-    "crates/rocoon-config",
     "crates/rocoon-client",
-    "crates/rocoon-server",
+    "crates/rocoon-config",
+    "crates/rocoon-contract",
     "crates/rocoon-openai",
     "crates/rocoon-protocol",
-    "crates/rocoon-contract",
+    "crates/rocoon-server",
+    "crates/rocoon-state",
     "crates/rocoon-transport",
 ]
 resolver = "3"
@@ -40,10 +41,11 @@ panic = "deny"
 [workspace.dependencies]
 rocoon-client = { path = "crates/rocoon-client" }
 rocoon-config = { path = "crates/rocoon-config" }
+rocoon-contract = { path = "crates/rocoon-contract" }
 rocoon-openai = { path = "crates/rocoon-openai" }
 rocoon-protocol = { path = "crates/rocoon-protocol" }
-rocoon-contract = { path = "crates/rocoon-contract" }
 rocoon-server = { path = "crates/rocoon-server" }
+rocoon-state = { path = "crates/rocoon-state" }
 rocoon-transport = { path = "crates/rocoon-transport" }
 anyhow = "1"
 async-openai = { version = "0.38", default-features = false, features = ["chat-completion-types", "model-types"] }
@@ -90,6 +92,7 @@ inquire = { workspace = true }
 rocoon-client = { workspace = true }
 rocoon-config = { workspace = true }
 rocoon-server = { workspace = true }
+rocoon-state = { workspace = true }
 serde_json = { workspace = true }
 signal-hook = { workspace = true }
 

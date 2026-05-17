@@ -2400,6 +2400,7 @@ dependencies = [
  "rocoon-client",
  "rocoon-config",
  "rocoon-server",
+ "rocoon-state",
  "serde_json",
  "signal-hook",
 ]
@@ -2473,6 +2474,14 @@ dependencies = [
  "serde",
  "serde_json",
  "tiny_http",
+]
+
+[[package]]
+name = "rocoon-state"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rocoon-config",
 ]
 
 [[package]]

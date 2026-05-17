@@ -1,0 +1,15 @@
+[package]
+name = "rocoon-state"
+version = { workspace = true }
+edition = { workspace = true }
+description = "Persistent CLI state helpers for rocoon."
+repository = { workspace = true }
+license = { workspace = true }
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+rocoon-config = { workspace = true }

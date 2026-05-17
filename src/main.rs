@@ -17,6 +17,7 @@ use rocoon_config::{
     RuntimeConfig,
     color::{ColorMode, OwoColorize, init_color_mode},
 };
+use rocoon_state::{CliState, ClientContractStatus};
 
 mod commands;
 
@@ -352,15 +353,6 @@ pub(crate) fn connect_cocoon_interactive(config: &RuntimeConfig) -> Result<Cocoo
 }
 
 #[derive(Debug)]
-struct CliState {
-    owner_address: String,
-    cocoon_wallet_address: String,
-    proxy_addr: String,
-    client_contract_address: String,
-    client_contract_status: ClientContractStatus,
-}
-
-#[derive(Debug)]
 struct ClosedClientContractStartError {
     cocoon_wallet_address: String,
     client_contract_address: Option<String>,
@@ -384,109 +376,6 @@ impl fmt::Display for ClosedClientContractStartError {
 }
 
 impl Error for ClosedClientContractStartError {}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ClientContractStatus {
-    Active,
-    CloseRequested,
-    Closed,
-}
-
-impl ClientContractStatus {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::CloseRequested => "close_requested",
-            Self::Closed => "closed",
-        }
-    }
-
-    fn parse(value: &str) -> Option<Self> {
-        match value {
-            "active" => Some(Self::Active),
-            "close_requested" => Some(Self::CloseRequested),
-            "closed" => Some(Self::Closed),
-            _ => None,
-        }
-    }
-}
-
-impl CliState {
-    fn new(
-        config: &RuntimeConfig,
-        client_contract_address: &str,
-        client_contract_status: ClientContractStatus,
-    ) -> Self {
-        Self {
-            owner_address: config.owner_address.clone(),
-            cocoon_wallet_address: config.cocoon_wallet_address.clone(),
-            proxy_addr: config.proxy_addr.clone(),
-            client_contract_address: client_contract_address.to_string(),
-            client_contract_status,
-        }
-    }
-
-    fn matches_config(&self, config: &RuntimeConfig) -> bool {
-        self.owner_address == config.owner_address
-            && self.cocoon_wallet_address == config.cocoon_wallet_address
-            && self.proxy_addr == config.proxy_addr
-    }
-
-    fn render(&self) -> String {
-        format!(
-            "version=1\nowner_address={}\ncocoon_wallet_address={}\nproxy_addr={}\nclient_contract_address={}\nclient_contract_status={}\n",
-            self.owner_address,
-            self.cocoon_wallet_address,
-            self.proxy_addr,
-            self.client_contract_address,
-            self.client_contract_status.as_str()
-        )
-    }
-
-    fn parse(data: &str) -> Result<Self> {
-        let mut version = None;
-        let mut owner_address = None;
-        let mut cocoon_wallet_address = None;
-        let mut proxy_addr = None;
-        let mut client_contract_address = None;
-        let mut client_contract_status = None;
-
-        for line in data.lines().map(str::trim) {
-            let Some((key, value)) = line.split_once('=') else {
-                continue;
-            };
-            match key {
-                "version" => version = Some(value.to_string()),
-                "owner_address" => owner_address = Some(value.to_string()),
-                "cocoon_wallet_address" => cocoon_wallet_address = Some(value.to_string()),
-                "proxy_addr" => proxy_addr = Some(value.to_string()),
-                "client_contract_address" => client_contract_address = Some(value.to_string()),
-                "client_contract_status" => {
-                    client_contract_status = ClientContractStatus::parse(value);
-                }
-                _ => {}
-            }
-        }
-
-        if version.as_deref() != Some("1") {
-            anyhow::bail!("unsupported rocoon state version");
-        }
-
-        Ok(Self {
-            owner_address: required_state_field(owner_address, "owner_address")?,
-            cocoon_wallet_address: required_state_field(
-                cocoon_wallet_address,
-                "cocoon_wallet_address",
-            )?,
-            proxy_addr: required_state_field(proxy_addr, "proxy_addr")?,
-            client_contract_address: required_state_field(
-                client_contract_address,
-                "client_contract_address",
-            )?,
-            client_contract_status: client_contract_status.unwrap_or(ClientContractStatus::Active),
-        })
-    }
-}
 
 fn remember_client_contract(
     config: &RuntimeConfig,
@@ -574,34 +463,4 @@ fn config_dir(config_path: &Path) -> &Path {
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
-}
-
-fn required_state_field(value: Option<String>, name: &str) -> Result<String> {
-    value.with_context(|| format!("missing {name} in rocoon state"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cli_state_parse_defaults_old_cache_to_active() -> Result<()> {
-        let state = CliState::parse(
-            "version=1\nowner_address=owner\ncocoon_wallet_address=wallet\nproxy_addr=proxy\nclient_contract_address=contract\n",
-        )?;
-
-        assert_eq!(state.client_contract_status, ClientContractStatus::Active);
-        Ok(())
-    }
-
-    #[test]
-    fn cli_state_round_trips_client_contract_status() -> Result<()> {
-        let state = CliState::parse(
-            "version=1\nowner_address=owner\ncocoon_wallet_address=wallet\nproxy_addr=proxy\nclient_contract_address=contract\nclient_contract_status=closed\n",
-        )?;
-
-        assert_eq!(state.client_contract_status, ClientContractStatus::Closed);
-        assert!(state.render().contains("client_contract_status=closed\n"));
-        Ok(())
-    }
 }
