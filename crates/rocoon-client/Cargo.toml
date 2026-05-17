@@ -1,25 +1,25 @@
 [package]
 name = "rocoon-client"
-version.workspace = true
-edition.workspace = true
+version = { workspace = true }
+edition = { workspace = true }
 description = "Reusable high-level Cocoon proxy client API."
-repository.workspace = true
-license.workspace = true
+repository = { workspace = true }
+license = { workspace = true }
 publish = false
 
 [lints]
 workspace = true
 
 [dependencies]
-anyhow.workspace = true
-ed25519-dalek.workspace = true
-inquire.workspace = true
-rand.workspace = true
+anyhow = { workspace = true }
+ed25519-dalek = { workspace = true }
+inquire = { workspace = true }
+rand = { workspace = true }
 rocoon-config = { workspace = true }
 rocoon-protocol = { workspace = true }
 rocoon-contract = { workspace = true }
 rocoon-transport = { workspace = true }
-sha2.workspace = true
-tokio.workspace = true
-ton.workspace = true
-ton_core.workspace = true
+sha2 = { workspace = true }
+tokio = { workspace = true }
+ton = { workspace = true }
+ton_core = { workspace = true }

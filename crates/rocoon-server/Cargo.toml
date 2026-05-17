@@ -1,19 +1,19 @@
 [package]
 name = "rocoon-server"
-version.workspace = true
-edition.workspace = true
+version = { workspace = true }
+edition = { workspace = true }
 description = "Local HTTP bridge for rocoon-client."
-repository.workspace = true
-license.workspace = true
+repository = { workspace = true }
+license = { workspace = true }
 publish = false
 
 [lints]
 workspace = true
 
 [dependencies]
-anyhow.workspace = true
+anyhow = { workspace = true }
 rocoon-client = { workspace = true }
 rocoon-openai = { workspace = true }
-serde.workspace = true
-serde_json.workspace = true
-tiny_http.workspace = true
+serde = { workspace = true }
+serde_json = { workspace = true }
+tiny_http = { workspace = true }

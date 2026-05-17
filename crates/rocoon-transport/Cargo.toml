@@ -1,20 +1,20 @@
 [package]
 name = "rocoon-transport"
-version.workspace = true
-edition.workspace = true
+version = { workspace = true }
+edition = { workspace = true }
 description = "Reusable Cocoon session framing over an authenticated byte stream."
-repository.workspace = true
-license.workspace = true
+repository = { workspace = true }
+license = { workspace = true }
 publish = false
 
 [lints]
 workspace = true
 
 [dependencies]
-anyhow.workspace = true
-rand.workspace = true
-rcgen.workspace = true
+anyhow = { workspace = true }
+rand = { workspace = true }
+rcgen = { workspace = true }
 rocoon-protocol = { workspace = true }
-rustls.workspace = true
-sha2.workspace = true
-tl-proto.workspace = true
+rustls = { workspace = true }
+sha2 = { workspace = true }
+tl-proto = { workspace = true }

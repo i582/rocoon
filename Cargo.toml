@@ -68,11 +68,11 @@ toml = "0.8"
 
 [package]
 name = "rocoon"
-version.workspace = true
-edition.workspace = true
+version = { workspace = true }
+edition = { workspace = true }
 description = "Minimal Rust bridge for the Cocoon proxy protocol."
-repository.workspace = true
-license.workspace = true
+repository = { workspace = true }
+license = { workspace = true }
 keywords = ["cocoon", "ton", "openai", "proxy"]
 categories = ["command-line-utilities", "network-programming"]
 publish = false
@@ -84,14 +84,14 @@ dist = true
 workspace = true
 
 [dependencies]
-anyhow.workspace = true
-clap.workspace = true
-inquire.workspace = true
+anyhow = { workspace = true }
+clap = { workspace = true }
+inquire = { workspace = true }
 rocoon-client = { workspace = true }
 rocoon-config = { workspace = true }
 rocoon-server = { workspace = true }
-serde_json.workspace = true
-signal-hook.workspace = true
+serde_json = { workspace = true }
+signal-hook = { workspace = true }
 
 [profile.release-size]
 inherits = "release"
