@@ -198,9 +198,15 @@ fn route_request(
                 state, defaults, &path, &body,
             ))
         }
-        (Method::Get, "/v2/models") => openai_handlers::v2::models::handle(),
-        (Method::Post, "/v2/chat/completions") => openai_handlers::v2::chat_completions::handle(),
+        (Method::Get, "/v2/models") => finalize(openai_handlers::v2::models::handle(state)),
+        (Method::Post, "/v2/chat/completions") => {
+            let body = read_body(request).map_err(bad_request)?;
+            finalize(openai_handlers::v2::chat_completions::handle(
+                state, defaults, &body,
+            ))
+        }
         (Method::Post, "/v2/completions") => openai_handlers::v2::completions::handle(),
+
         _ => finalize(Ok(Json::new(
             tiny_http::StatusCode(404),
             openai_errors::make_response("not found", "invalid_request_error"),

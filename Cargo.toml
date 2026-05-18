@@ -48,7 +48,7 @@ rocoon-server = { path = "crates/rocoon-server" }
 rocoon-state = { path = "crates/rocoon-state" }
 rocoon-transport = { path = "crates/rocoon-transport" }
 anyhow = "1"
-async-openai = { version = "0.38", default-features = false, features = ["chat-completion-types", "model-types"] }
+async-openai = { version = "0.38", default-features = false, features = ["chat-completion-types", "completion-types", "model-types"] }
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 ed25519-dalek = "2.2"

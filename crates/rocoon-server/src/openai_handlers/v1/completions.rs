@@ -84,6 +84,7 @@ pub fn handle(
             return Err(bad_gateway(error));
         }
     };
+
     if completion.stream && (200..300).contains(&response.status_code) {
         Ok(CompletionResponse::Stream {
             response,
