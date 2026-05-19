@@ -127,7 +127,7 @@ mod tests {
         let request = parse_request(br#"{"model":"test-model","messages":[]}"#)
             .expect("chat completion request should parse");
 
-        assert_eq!(request.model(), "test-model");
+        assert_eq!(request.openai.model.to_string(), "test-model");
     }
 
     #[test]

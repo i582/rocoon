@@ -6,11 +6,13 @@
 
 pub mod chat_completion_stream;
 pub mod chat_completions;
+pub mod completions;
 pub mod errors;
 pub mod models;
 
 mod request;
 
 pub use chat_completions::{ChatCompletionRequest, ChatCompletionResponse};
+pub use completions::{CompletionRequest, CompletionResponse};
 pub use errors::ErrorResponse;
 pub use models::{ListModelResponse, Model};

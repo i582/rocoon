@@ -186,7 +186,7 @@ fn route_request(
     let method = request.method().clone();
     let path = split_path_query(request.url()).0.to_string();
 
-    match (method, path.as_str()) {
+    match (method.clone(), path.as_str()) {
         (Method::Get, "/health") => finalize(Ok(handlers::health::handle())),
         (Method::Get, "/stats" | "/jsonstats" | "/v1/stats") => {
             finalize(handlers::stats::handle(state))
@@ -205,12 +205,21 @@ fn route_request(
                 state, defaults, &body,
             ))
         }
-        (Method::Post, "/v2/completions") => openai_handlers::v2::completions::handle(),
+        (Method::Post, "/v2/completions") => {
+            let body = read_body(request).map_err(bad_request)?;
+            finalize(openai_handlers::v2::completions::handle(
+                state, defaults, &body,
+            ))
+        }
 
-        _ => finalize(Ok(Json::new(
-            tiny_http::StatusCode(404),
-            openai_errors::make_response("not found", "invalid_request_error"),
-        ))),
+        _ => {
+            eprintln!("Unsupported HTTP method or path: {method} {path}");
+
+            finalize(Ok(Json::new(
+                tiny_http::StatusCode(404),
+                openai_errors::make_response("not found", "invalid_request_error"),
+            )))
+        }
     }
 }
 

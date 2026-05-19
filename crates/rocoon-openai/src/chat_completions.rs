@@ -27,12 +27,7 @@ pub struct ChatCompletionRequest {
     pub non_standard: RequestNonStandardFields,
 }
 
-impl ChatCompletionRequest {
-    #[must_use]
-    pub fn model(&self) -> &str {
-        &self.openai.model
-    }
-}
+impl ChatCompletionRequest {}
 
 impl<'de> Deserialize<'de> for ChatCompletionRequest {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -122,7 +117,7 @@ pub fn make_response(
             logprobs: None,
         }],
         created,
-        model: request.model().to_string(),
+        model: request.openai.model.to_string(),
         service_tier: request.openai.service_tier.clone(),
         system_fingerprint: None,
         object: "chat.completion".to_string(),
@@ -167,7 +162,7 @@ mod tests {
         let response =
             serde_json::to_value(response).expect("chat completion response should serialize");
 
-        assert_eq!(request.model(), "test-model");
+        assert_eq!(request.openai.model.to_string(), "test-model");
         assert_eq!(response["model"], "test-model");
         assert_eq!(response["object"], "chat.completion");
         assert_eq!(response["choices"][0]["message"]["role"], "assistant");
@@ -188,7 +183,7 @@ mod tests {
         )
         .expect("chat completion request JSON should parse");
 
-        assert_eq!(request.model(), "test-model");
+        assert_eq!(request.openai.model.to_string(), "test-model");
         assert_eq!(request.openai.stream, Some(true));
         assert_eq!(request.non_standard.skip_special_tokens, Some(true));
         assert_eq!(request.non_standard.max_coefficient, Some(10));
