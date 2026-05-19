@@ -25,7 +25,7 @@ impl IntoServerResponse for HandlerResponse {
     }
 }
 
-/// Handles `POST /v2/chat/completions`.
+/// Handles `POST /v1/chat/completions`.
 pub fn handle(
     state: &ServerState,
     defaults: Defaults,

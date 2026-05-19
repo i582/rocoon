@@ -3,7 +3,6 @@
 use std::io::{Cursor, Read};
 
 use anyhow::{Context, Result};
-use rocoon_client::HttpExchange;
 use tiny_http::{Header, Request, Response, StatusCode};
 
 const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
@@ -28,8 +27,6 @@ impl<T> Json<T> {
     }
 }
 
-pub struct Upstream(pub HttpExchange);
-
 pub trait IntoServerResponse {
     fn into_server_response(self) -> Result<ServerResponse>;
 }
@@ -40,12 +37,6 @@ where
 {
     fn into_server_response(self) -> Result<ServerResponse> {
         json_response(self.status_code, &self.value)
-    }
-}
-
-impl IntoServerResponse for Upstream {
-    fn into_server_response(self) -> Result<ServerResponse> {
-        upstream_response(self.0)
     }
 }
 
@@ -98,14 +89,6 @@ pub fn split_path_query(path: &str) -> (&str, &str) {
         .map_or((path, ""), |(path, query)| (path, query))
 }
 
-/// Converts a Cocoon worker HTTP response into a local response.
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn upstream_response(response: HttpExchange) -> Result<ServerResponse> {
-    let headers = sanitized_response_headers(response.headers);
-    let status_code = StatusCode(response.status_code as u16);
-    response_with_body(status_code, headers, response.payload)
-}
-
 /// Builds a JSON response with a generated HTTP status line and length.
 pub fn json_response(
     status_code: StatusCode,
@@ -139,17 +122,4 @@ pub fn response_with_body(
 fn header(name: &str, value: &str) -> Result<Header> {
     Header::from_bytes(name.as_bytes(), value.as_bytes())
         .map_err(|()| anyhow::anyhow!("invalid HTTP response header {name}: {value}"))
-}
-
-/// Removes hop-by-hop and Cocoon-internal response headers.
-fn sanitized_response_headers(headers: Vec<(String, String)>) -> Vec<(String, String)> {
-    headers
-        .into_iter()
-        .filter(|(name, _)| {
-            !name.eq_ignore_ascii_case("content-length")
-                && !name.eq_ignore_ascii_case("connection")
-                && !name.eq_ignore_ascii_case("transfer-encoding")
-                && !name.to_ascii_lowercase().starts_with("x-cocoon-")
-        })
-        .collect()
 }

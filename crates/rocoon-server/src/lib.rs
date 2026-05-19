@@ -87,10 +87,9 @@ pub fn bind(listen_addr: &str) -> Result<Listener> {
 /// Serves the local OpenAI-compatible API until shutdown is requested.
 ///
 /// Supported endpoints are `/health`, `/stats`, `/jsonstats`, `/v1/stats`,
-/// `/v1/models`, `/v1/chat/completions`, `/v1/completions`, `/v2/models`,
-/// `/v2/chat/completions`, and `/v2/completions`. Each request is handled on a
-/// separate thread while access to the underlying Cocoon client remains
-/// serialized.
+/// `/v1/models`, `/v1/chat/completions`, and `/v1/completions`. Each request
+/// is handled on a separate thread while access to the underlying Cocoon client
+/// remains serialized.
 ///
 /// # Errors
 ///
@@ -199,22 +198,15 @@ fn route_request(
             finalize(handlers::stats::handle(state))
         }
         (Method::Get, "/v1/models") => finalize(openai_handlers::v1::models::handle(state)),
-        (Method::Post, "/v1/chat/completions" | "/v1/completions") => {
+        (Method::Post, "/v1/chat/completions") => {
             let body = read_body(request).map_err(bad_request)?;
-            finalize(openai_handlers::v1::completions::handle(
-                state, defaults, &path, &body,
-            ))
-        }
-        (Method::Get, "/v2/models") => finalize(openai_handlers::v2::models::handle(state)),
-        (Method::Post, "/v2/chat/completions") => {
-            let body = read_body(request).map_err(bad_request)?;
-            finalize(openai_handlers::v2::chat_completions::handle(
+            finalize(openai_handlers::v1::chat_completions::handle(
                 state, defaults, &body,
             ))
         }
-        (Method::Post, "/v2/completions") => {
+        (Method::Post, "/v1/completions") => {
             let body = read_body(request).map_err(bad_request)?;
-            finalize(openai_handlers::v2::completions::handle(
+            finalize(openai_handlers::v1::completions::handle(
                 state, defaults, &body,
             ))
         }
