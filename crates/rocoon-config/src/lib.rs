@@ -8,4 +8,4 @@ pub mod color;
 mod config;
 pub mod wallet;
 
-pub use config::{NodeWalletKey, RuntimeConfig, TonRuntimeConfig};
+pub use config::{LocalHttpRuntimeConfig, NodeWalletKey, RuntimeConfig, TonRuntimeConfig};

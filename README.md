@@ -78,6 +78,7 @@ connect_timeout_secs = 5
 
 [server]
 listen_addr = "127.0.0.1:9999"
+api_token = ""
 
 [client]
 owner_address = "<external-owner-wallet-address>"
@@ -143,7 +144,7 @@ When the proxy reports that the cached client contract is closing or closed,
 Environment overrides:
 
 ```bash
-COCOON_PROXY_ADDR=91.108.4.11:8888 COCOON_OWNER_ADDRESS=<owner-wallet-address> COCOON_NODE_WALLET_KEY=... COCOON_CLIENT_SECRET=... rocoon start
+COCOON_PROXY_ADDR=91.108.4.11:8888 COCOON_OWNER_ADDRESS=<owner-wallet-address> COCOON_NODE_WALLET_KEY=... COCOON_CLIENT_SECRET=... ROCOON_API_TOKEN=... rocoon start
 ```
 
 API:
@@ -155,6 +156,9 @@ curl http://127.0.0.1:9999/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"Qwen/Qwen3-32B","messages":[{"role":"user","content":"Say hello"}],"max_tokens":8}'
 ```
+
+When `server.api_token` or `ROCOON_API_TOKEN` is non-empty, every local HTTP
+request must include `Authorization: Bearer <token>`.
 
 `/stats` returns locally observed request counters, token usage from Cocoon
 `final_info`, worker response `usage.total_cost`, proxy/debug strings from the

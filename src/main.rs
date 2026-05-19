@@ -163,12 +163,20 @@ fn run() -> Result<()> {
     }
 
     if matches!(command, Command::Health) {
-        let listen_addr = RuntimeConfig::load_listen_addr_cli(config)?;
-        return commands::health::run(&listen_addr, verbose);
+        let local_http = RuntimeConfig::load_local_http_cli(config)?;
+        return commands::health::run(
+            &local_http.listen_addr,
+            local_http.api_token.as_deref(),
+            verbose,
+        );
     }
     if matches!(command, Command::Stats) {
-        let listen_addr = RuntimeConfig::load_listen_addr_cli(config)?;
-        return commands::stats::run(&listen_addr, verbose);
+        let local_http = RuntimeConfig::load_local_http_cli(config)?;
+        return commands::stats::run(
+            &local_http.listen_addr,
+            local_http.api_token.as_deref(),
+            verbose,
+        );
     }
 
     let config = RuntimeConfig::load_cli(config, verbose)?;

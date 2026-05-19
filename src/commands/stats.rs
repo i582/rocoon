@@ -6,10 +6,10 @@ use super::local_http;
 
 const LABEL_WIDTH: usize = 16;
 
-pub fn run(listen_addr: &str, verbose: bool) -> Result<()> {
+pub fn run(listen_addr: &str, api_token: Option<&str>, verbose: bool) -> Result<()> {
     let url = local_http::url(listen_addr, "/stats");
     println!("{} Fetching {}", ">".cyan().bold(), url.cyan().bold());
-    let response = local_http::get(listen_addr, "/stats")?;
+    let response = local_http::get(listen_addr, "/stats", api_token)?;
     if response.status_code != 200 {
         anyhow::bail!(
             "rocoon server at {} returned HTTP {}; expected 200",

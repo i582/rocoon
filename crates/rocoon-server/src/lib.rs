@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use rocoon_client::CocoonClient;
 use rocoon_openai::errors as openai_errors;
-use tiny_http::{Method, Request, Server};
+use tiny_http::{Header, Method, Request, Server, StatusCode};
 
 mod handlers;
 mod http;
@@ -23,8 +23,8 @@ mod openai_handlers;
 mod stats;
 
 use http::{
-    HandlerError, HandlerResult, Json, ServerResponse, bad_request, finalize, internal_message,
-    json_response, read_body, split_path_query,
+    HandlerError, HandlerResult, Json, ServerResponse, bad_request, finalize, internal,
+    internal_message, json_response, read_body, split_path_query,
 };
 use stats::ServerStats;
 pub use stats::SessionSummary;
@@ -53,6 +53,7 @@ pub struct Listener {
 pub(crate) struct ServerState {
     client: Mutex<CocoonClient>,
     stats: Mutex<ServerStats>,
+    api_token: Option<String>,
 }
 
 impl ServerState {
@@ -100,10 +101,11 @@ pub fn serve(
     listen_addr: &str,
     client: CocoonClient,
     defaults: Defaults,
+    api_token: Option<String>,
     shutdown_requested: &Arc<AtomicBool>,
 ) -> Result<SessionSummary> {
     let listener = bind(listen_addr)?;
-    serve_bound(listener, client, defaults, shutdown_requested)
+    serve_bound(listener, client, defaults, api_token, shutdown_requested)
 }
 
 /// Serves the local OpenAI-compatible API using an already-bound listener.
@@ -115,6 +117,7 @@ pub fn serve_bound(
     listener: Listener,
     client: CocoonClient,
     defaults: Defaults,
+    api_token: Option<String>,
     shutdown_requested: &Arc<AtomicBool>,
 ) -> Result<SessionSummary> {
     let Listener {
@@ -127,6 +130,7 @@ pub fn serve_bound(
     let state = Arc::new(ServerState {
         client: Mutex::new(client),
         stats: Mutex::new(ServerStats::default()),
+        api_token: api_token.filter(|token| !token.is_empty()),
     });
     spawn_maintenance_thread(Arc::clone(&state), Arc::clone(shutdown_requested));
     while !shutdown_requested.load(Ordering::SeqCst) {
@@ -185,6 +189,9 @@ fn route_request(
 ) -> HandlerResult<ServerResponse> {
     let method = request.method().clone();
     let path = split_path_query(request.url()).0.to_string();
+    if let Some(response) = unauthorized_response(request.headers(), state.api_token.as_deref())? {
+        return Ok(response);
+    }
 
     match (method.clone(), path.as_str()) {
         (Method::Get, "/health") => finalize(Ok(handlers::health::handle())),
@@ -223,6 +230,31 @@ fn route_request(
     }
 }
 
+fn unauthorized_response(
+    headers: &[Header],
+    api_token: Option<&str>,
+) -> HandlerResult<Option<ServerResponse>> {
+    let Some(api_token) = api_token else {
+        return Ok(None);
+    };
+
+    if authorization_header_matches(headers, api_token) {
+        return Ok(None);
+    }
+
+    let body = openai_errors::make_response("missing or invalid API token", "authentication_error");
+    json_response(StatusCode(401), &body)
+        .map(Some)
+        .map_err(internal)
+}
+
+fn authorization_header_matches(headers: &[Header], api_token: &str) -> bool {
+    let expected = format!("Bearer {api_token}");
+    headers
+        .iter()
+        .any(|header| header.field.equiv("Authorization") && header.value.as_str() == expected)
+}
+
 fn log_handler_error((status_code, error): &HandlerError) {
     eprintln!("HTTP request failed ({}): {error:#}", status_code.0);
 }
@@ -234,4 +266,36 @@ fn error_response((status_code, error): HandlerError) -> ServerResponse {
         tiny_http::Response::from_string("internal server error")
             .with_status_code(tiny_http::StatusCode(500))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr as _;
+
+    use super::authorization_header_matches;
+    use tiny_http::Header;
+
+    #[test]
+    fn authorization_header_matches_configured_bearer_token() {
+        let headers = [Header::from_str("Authorization: Bearer 12345")
+            .expect("authorization header should parse")];
+
+        assert!(authorization_header_matches(&headers, "12345"));
+    }
+
+    #[test]
+    fn authorization_header_name_is_case_insensitive() {
+        let headers = [Header::from_str("authorization: Bearer 12345")
+            .expect("authorization header should parse")];
+
+        assert!(authorization_header_matches(&headers, "12345"));
+    }
+
+    #[test]
+    fn authorization_header_rejects_wrong_token() {
+        let headers = [Header::from_str("Authorization: Bearer wrong")
+            .expect("authorization header should parse")];
+
+        assert!(!authorization_header_matches(&headers, "12345"));
+    }
 }

@@ -30,7 +30,13 @@ pub fn run(config: &RuntimeConfig) -> Result<()> {
     let _interrupt_signal_id = signal_hook::flag::register(SIGINT, Arc::clone(&shutdown_requested))
         .context("install Ctrl+C handler")?;
 
-    let summary = serve_bound(listener, client, defaults, &shutdown_requested)?;
+    let summary = serve_bound(
+        listener,
+        client,
+        defaults,
+        config.api_token.clone(),
+        &shutdown_requested,
+    )?;
     if shutdown_requested.load(Ordering::SeqCst) {
         print_session_summary(&summary);
     }

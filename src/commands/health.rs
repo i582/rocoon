@@ -3,10 +3,10 @@ use rocoon_config::color::OwoColorize;
 
 use super::local_http;
 
-pub fn run(listen_addr: &str, verbose: bool) -> Result<()> {
+pub fn run(listen_addr: &str, api_token: Option<&str>, verbose: bool) -> Result<()> {
     let url = local_http::url(listen_addr, "/health");
     println!("{} Checking {}", ">".cyan().bold(), url.cyan().bold());
-    let response = local_http::get(listen_addr, "/health")?;
+    let response = local_http::get(listen_addr, "/health", api_token)?;
     if response.status_code != 200 {
         anyhow::bail!(
             "rocoon server at {} returned HTTP {}; expected 200",

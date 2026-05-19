@@ -44,6 +44,8 @@ pub struct RuntimeConfig {
     pub connect_timeout: Duration,
     /// Local OpenAI-compatible HTTP listen address.
     pub listen_addr: String,
+    /// Optional bearer token required by the local HTTP API.
+    pub api_token: Option<String>,
     /// External TON wallet address that owns the Cocoon wallet contract.
     pub owner_address: String,
     /// Decoded Ed25519 seed used by the Cocoon wallet contract.
@@ -81,6 +83,15 @@ pub struct TonRuntimeConfig {
     pub query_timeout_millis: u64,
 }
 
+/// Local HTTP settings loaded without requiring wallet credentials.
+#[derive(Debug, Clone)]
+pub struct LocalHttpRuntimeConfig {
+    /// Local OpenAI-compatible HTTP listen address.
+    pub listen_addr: String,
+    /// Optional bearer token required by the local HTTP API.
+    pub api_token: Option<String>,
+}
+
 /// TOML root object before validation and environment overrides.
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -105,6 +116,8 @@ struct NetworkConfig {
 #[serde(default, deny_unknown_fields)]
 struct ServerConfig {
     listen_addr: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    api_token: Option<String>,
 }
 
 /// Cocoon client identity and authorization TOML section.
@@ -198,18 +211,31 @@ impl RuntimeConfig {
         )
     }
 
-    /// Loads only the local HTTP listen address using TOML defaults and env overrides.
+    /// Loads only the local HTTP settings using TOML defaults and env overrides.
     ///
     /// # Errors
     ///
-    /// Returns an error if the config cannot be read or `server.listen_addr` is empty.
-    pub fn load_listen_addr_cli(config_path: Option<PathBuf>) -> Result<String> {
+    /// Returns an error if the config cannot be read or local HTTP settings are invalid.
+    pub fn load_local_http_cli(config_path: Option<PathBuf>) -> Result<LocalHttpRuntimeConfig> {
         let explicit_config_path = config_path.is_some();
         let config_path = config_path.unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
         let mut config = read_config(&config_path, explicit_config_path)?;
         apply_string_env("ROCOON_LISTEN_ADDR", &mut config.server.listen_addr)?;
-        validate_listen_addr(&config.server.listen_addr)?;
-        Ok(config.server.listen_addr)
+        apply_optional_string_env("ROCOON_API_TOKEN", &mut config.server.api_token)?;
+        validate_server(&config.server)?;
+        Ok(LocalHttpRuntimeConfig {
+            listen_addr: config.server.listen_addr,
+            api_token: normalize_optional_string(config.server.api_token),
+        })
+    }
+
+    /// Loads only the local HTTP listen address using TOML defaults and env overrides.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the config cannot be read or local HTTP settings are invalid.
+    pub fn load_listen_addr_cli(config_path: Option<PathBuf>) -> Result<String> {
+        Self::load_local_http_cli(config_path).map(|config| config.listen_addr)
     }
 
     fn load_from_path(
@@ -252,6 +278,7 @@ impl RuntimeConfig {
             proxy_addr: config.network.proxy_addr,
             connect_timeout: Duration::from_secs(config.network.connect_timeout_secs),
             listen_addr: config.server.listen_addr,
+            api_token: normalize_optional_string(config.server.api_token),
             owner_address: config.client.owner_address,
             node_wallet_key,
             cocoon_wallet_address,
@@ -297,6 +324,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             listen_addr: "127.0.0.1:9999".to_string(),
+            api_token: None,
         }
     }
 }
@@ -324,6 +352,10 @@ impl Default for TonConfig {
 
 fn default_file_config(owner_address: &str, node_wallet_key: &str) -> FileConfig {
     FileConfig {
+        server: ServerConfig {
+            api_token: Some(String::new()),
+            ..ServerConfig::default()
+        },
         client: ClientConfig {
             owner_address: owner_address.to_string(),
             node_wallet_key: node_wallet_key.to_string(),
@@ -363,6 +395,7 @@ fn apply_env_overrides(config: &mut FileConfig) -> Result<()> {
         &mut config.network.connect_timeout_secs,
     )?;
     apply_string_env("ROCOON_LISTEN_ADDR", &mut config.server.listen_addr)?;
+    apply_optional_string_env("ROCOON_API_TOKEN", &mut config.server.api_token)?;
     apply_string_env("COCOON_OWNER_ADDRESS", &mut config.client.owner_address)?;
     apply_string_env("COCOON_NODE_WALLET_KEY", &mut config.client.node_wallet_key)?;
     apply_optional_string_env("COCOON_CLIENT_SECRET", &mut config.client.secret)?;
@@ -412,6 +445,10 @@ fn apply_optional_string_env(name: &str, target: &mut Option<String>) -> Result<
         *target = if value.is_empty() { None } else { Some(value) };
     }
     Ok(())
+}
+
+fn normalize_optional_string(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.is_empty())
 }
 
 fn apply_optional_path_env(name: &str, target: &mut Option<PathBuf>) -> Result<()> {
@@ -473,7 +510,7 @@ fn validate(config: &FileConfig) -> Result<()> {
     if config.network.connect_timeout_secs == 0 {
         anyhow::bail!("network.connect_timeout_secs must be greater than zero");
     }
-    validate_listen_addr(&config.server.listen_addr)?;
+    validate_server(&config.server)?;
     if config.client.owner_address.trim().is_empty() {
         anyhow::bail!("client.owner_address must not be empty");
     }
@@ -501,6 +538,17 @@ fn validate(config: &FileConfig) -> Result<()> {
     }
     if config.ton.query_timeout_millis == 0 {
         anyhow::bail!("ton.query_timeout_millis must be greater than zero");
+    }
+    Ok(())
+}
+
+fn validate_server(config: &ServerConfig) -> Result<()> {
+    validate_listen_addr(&config.listen_addr)?;
+    if let Some(api_token) = &config.api_token
+        && !api_token.is_empty()
+        && api_token.trim().is_empty()
+    {
+        anyhow::bail!("server.api_token must not be blank when set");
     }
     Ok(())
 }
@@ -550,6 +598,7 @@ mod tests {
         assert_eq!(parsed.client.owner_address, owner_address);
         assert_eq!(parsed.client.node_wallet_key, node_wallet_key);
         assert_eq!(parsed.network.proxy_addr, "91.108.4.11:8888");
+        assert_eq!(parsed.server.api_token.as_deref(), Some(""));
         assert!(parsed.ton.mainnet);
     }
 }

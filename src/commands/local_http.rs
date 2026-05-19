@@ -12,7 +12,7 @@ pub struct LocalHttpResponse {
     pub body: String,
 }
 
-pub fn get(listen_addr: &str, path: &str) -> Result<LocalHttpResponse> {
+pub fn get(listen_addr: &str, path: &str, api_token: Option<&str>) -> Result<LocalHttpResponse> {
     let mut stream = match TcpStream::connect(listen_addr) {
         Ok(stream) => stream,
         Err(error) => return Err(connect_error(listen_addr, path, &error)),
@@ -23,8 +23,12 @@ pub fn get(listen_addr: &str, path: &str) -> Result<LocalHttpResponse> {
     stream
         .set_write_timeout(Some(LOCAL_HTTP_TIMEOUT))
         .context("set local HTTP write timeout")?;
-    let request =
-        format!("GET {path} HTTP/1.1\r\nHost: {listen_addr}\r\nConnection: close\r\n\r\n");
+    let authorization = api_token.map_or_else(String::new, |token| {
+        format!("Authorization: Bearer {token}\r\n")
+    });
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: {listen_addr}\r\n{authorization}Connection: close\r\n\r\n"
+    );
     stream
         .write_all(request.as_bytes())
         .with_context(|| format!("send local HTTP request {path}"))?;
