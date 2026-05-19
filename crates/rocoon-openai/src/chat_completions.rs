@@ -1,14 +1,12 @@
 //! Types for `/v1/chat/completions`.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use async_openai::types::chat::{
-    ChatChoice, ChatCompletionResponseMessage, CreateChatCompletionRequest,
-    CreateChatCompletionResponse, FinishReason, Role,
-};
+use async_openai::types::chat::{CreateChatCompletionRequest, CreateChatCompletionResponse};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::request::{deserialize_flat_request, serialize_flat_request};
+pub use crate::request_non_standard::{
+    ChatCompletionRequestNonStandardFields as RequestNonStandardFields, ChatTemplateKwargs,
+};
 
 const DISABLED_OPENAI_FIELDS: &[&str] = &[
     "function",
@@ -57,30 +55,6 @@ impl Serialize for ChatCompletionRequest {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
-pub struct RequestNonStandardFields {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub skip_special_tokens: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub chat_template_kwargs: Option<ChatTemplateKwargs>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_coefficient: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timeout: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub enable_debug: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub request_guid: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub receiver_public_key: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct ChatTemplateKwargs {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub enable_thinking: Option<bool>,
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(transparent)]
 pub struct ChatCompletionResponse(CreateChatCompletionResponse);
@@ -90,39 +64,6 @@ impl ChatCompletionResponse {
     pub(crate) const fn inner(&self) -> &CreateChatCompletionResponse {
         &self.0
     }
-}
-
-#[must_use]
-#[allow(deprecated)]
-pub fn make_response(
-    request: &ChatCompletionRequest,
-    content: impl Into<String>,
-) -> ChatCompletionResponse {
-    let created = unix_timestamp();
-
-    ChatCompletionResponse(CreateChatCompletionResponse {
-        id: default_response_id(created),
-        choices: vec![ChatChoice {
-            index: 0,
-            message: ChatCompletionResponseMessage {
-                content: Some(content.into()),
-                refusal: None,
-                tool_calls: None,
-                annotations: None,
-                role: Role::Assistant,
-                function_call: None,
-                audio: None,
-            },
-            finish_reason: Some(FinishReason::Stop),
-            logprobs: None,
-        }],
-        created,
-        model: request.openai.model.to_string(),
-        service_tier: request.openai.service_tier.clone(),
-        system_fingerprint: None,
-        object: "chat.completion".to_string(),
-        usage: None,
-    })
 }
 
 /// Parses an `OpenAI` chat completion response JSON body.
@@ -135,21 +76,14 @@ pub fn parse_response(body: &[u8]) -> serde_json::Result<ChatCompletionResponse>
     serde_json::from_slice(body)
 }
 
-#[must_use]
-fn unix_timestamp() -> u32 {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs());
-    u32::try_from(seconds).unwrap_or(u32::MAX)
-}
-
-#[must_use]
-fn default_response_id(created: u32) -> String {
-    format!("chatcmpl-rocoon-{created}")
-}
-
 #[cfg(test)]
 mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use async_openai::types::chat::{
+        ChatChoice, ChatCompletionResponseMessage, FinishReason, Role,
+    };
+
     use super::*;
 
     #[test]
@@ -162,7 +96,7 @@ mod tests {
         let response =
             serde_json::to_value(response).expect("chat completion response should serialize");
 
-        assert_eq!(request.openai.model.to_string(), "test-model");
+        assert_eq!(request.openai.model.as_str(), "test-model");
         assert_eq!(response["model"], "test-model");
         assert_eq!(response["object"], "chat.completion");
         assert_eq!(response["choices"][0]["message"]["role"], "assistant");
@@ -183,7 +117,7 @@ mod tests {
         )
         .expect("chat completion request JSON should parse");
 
-        assert_eq!(request.openai.model.to_string(), "test-model");
+        assert_eq!(request.openai.model.as_str(), "test-model");
         assert_eq!(request.openai.stream, Some(true));
         assert_eq!(request.non_standard.skip_special_tokens, Some(true));
         assert_eq!(request.non_standard.max_coefficient, Some(10));
@@ -238,5 +172,51 @@ mod tests {
 
         assert_eq!(response["model"], "test-model");
         assert_eq!(response["choices"][0]["message"]["content"], "hello");
+    }
+
+    #[must_use]
+    #[allow(deprecated)]
+    fn make_response(
+        request: &ChatCompletionRequest,
+        content: impl Into<String>,
+    ) -> ChatCompletionResponse {
+        let created = unix_timestamp();
+
+        ChatCompletionResponse(CreateChatCompletionResponse {
+            id: default_response_id(created),
+            choices: vec![ChatChoice {
+                index: 0,
+                message: ChatCompletionResponseMessage {
+                    content: Some(content.into()),
+                    refusal: None,
+                    tool_calls: None,
+                    annotations: None,
+                    role: Role::Assistant,
+                    function_call: None,
+                    audio: None,
+                },
+                finish_reason: Some(FinishReason::Stop),
+                logprobs: None,
+            }],
+            created,
+            model: request.openai.model.clone(),
+            service_tier: request.openai.service_tier.clone(),
+            system_fingerprint: None,
+            object: "chat.completion".to_string(),
+            usage: None,
+        })
+    }
+
+    #[must_use]
+    fn unix_timestamp() -> u32 {
+        let seconds = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs());
+        u32::try_from(seconds).unwrap_or(u32::MAX)
+    }
+
+    #[must_use]
+    fn default_response_id(created: u32) -> String {
+        format!("chatcmpl-rocoon-{created}")
     }
 }

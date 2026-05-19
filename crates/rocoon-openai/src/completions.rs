@@ -1,12 +1,10 @@
 //! Types for `/v1/completions`.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use async_openai::types::chat::{Choice, CompletionFinishReason};
 use async_openai::types::completions::{CreateCompletionRequest, CreateCompletionResponse};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::request::{deserialize_flat_request, serialize_flat_request};
+pub use crate::request_non_standard::CompletionRequestNonStandardFields as RequestNonStandardFields;
 
 const DISABLED_OPENAI_FIELDS: &[&str] = &["logit_bias"];
 
@@ -14,13 +12,6 @@ const DISABLED_OPENAI_FIELDS: &[&str] = &["logit_bias"];
 pub struct CompletionRequest {
     pub openai: CreateCompletionRequest,
     pub non_standard: RequestNonStandardFields,
-}
-
-impl CompletionRequest {
-    #[must_use]
-    pub fn model(&self) -> &str {
-        &self.openai.model
-    }
 }
 
 impl<'de> Deserialize<'de> for CompletionRequest {
@@ -51,48 +42,9 @@ impl Serialize for CompletionRequest {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
-pub struct RequestNonStandardFields {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub skip_special_tokens: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_coefficient: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timeout: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub enable_debug: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub request_guid: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub receiver_public_key: Option<String>,
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(transparent)]
 pub struct CompletionResponse(CreateCompletionResponse);
-
-#[must_use]
-pub fn make_response(
-    request: &CompletionRequest,
-    content: impl Into<String>,
-) -> CompletionResponse {
-    let created = unix_timestamp();
-
-    CompletionResponse(CreateCompletionResponse {
-        id: default_response_id(created),
-        choices: vec![Choice {
-            text: content.into(),
-            index: 0,
-            logprobs: None,
-            finish_reason: Some(CompletionFinishReason::Stop),
-        }],
-        created,
-        model: request.model().to_string(),
-        system_fingerprint: None,
-        object: "text_completion".to_string(),
-        usage: None,
-    })
-}
 
 /// Parses an `OpenAI` completion response JSON body.
 ///
@@ -104,21 +56,12 @@ pub fn parse_response(body: &[u8]) -> serde_json::Result<CompletionResponse> {
     serde_json::from_slice(body)
 }
 
-#[must_use]
-fn unix_timestamp() -> u32 {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs());
-    u32::try_from(seconds).unwrap_or(u32::MAX)
-}
-
-#[must_use]
-fn default_response_id(created: u32) -> String {
-    format!("cmpl-rocoon-{created}")
-}
-
 #[cfg(test)]
 mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use async_openai::types::chat::{Choice, CompletionFinishReason};
+
     use super::*;
 
     #[test]
@@ -131,7 +74,7 @@ mod tests {
         let response =
             serde_json::to_value(response).expect("completion response should serialize");
 
-        assert_eq!(request.model(), "test-model");
+        assert_eq!(request.openai.model, "test-model");
         assert_eq!(response["model"], "test-model");
         assert_eq!(response["object"], "text_completion");
         assert_eq!(response["choices"][0]["text"], "done");
@@ -150,7 +93,7 @@ mod tests {
         )
         .expect("completion request JSON should parse");
 
-        assert_eq!(request.model(), "test-model");
+        assert_eq!(request.openai.model, "test-model");
         assert_eq!(request.openai.stream, Some(true));
         assert_eq!(request.non_standard.skip_special_tokens, Some(true));
         assert_eq!(request.non_standard.max_coefficient, Some(10));
@@ -192,5 +135,41 @@ mod tests {
 
         assert_eq!(response["model"], "test-model");
         assert_eq!(response["choices"][0]["text"], "hello");
+    }
+
+    #[must_use]
+    fn make_response(
+        request: &CompletionRequest,
+        content: impl Into<String>,
+    ) -> CompletionResponse {
+        let created = unix_timestamp();
+
+        CompletionResponse(CreateCompletionResponse {
+            id: default_response_id(created),
+            choices: vec![Choice {
+                text: content.into(),
+                index: 0,
+                logprobs: None,
+                finish_reason: Some(CompletionFinishReason::Stop),
+            }],
+            created,
+            model: request.openai.model.clone(),
+            system_fingerprint: None,
+            object: "text_completion".to_string(),
+            usage: None,
+        })
+    }
+
+    #[must_use]
+    fn unix_timestamp() -> u32 {
+        let seconds = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs());
+        u32::try_from(seconds).unwrap_or(u32::MAX)
+    }
+
+    #[must_use]
+    fn default_response_id(created: u32) -> String {
+        format!("cmpl-rocoon-{created}")
     }
 }

@@ -92,7 +92,7 @@ mod tests {
         let request = parse_request(br#"{"model":"test-model","prompt":"hello"}"#)
             .expect("completion request should parse");
 
-        assert_eq!(request.model(), "test-model");
+        assert_eq!(request.openai.model, "test-model");
     }
 
     #[test]

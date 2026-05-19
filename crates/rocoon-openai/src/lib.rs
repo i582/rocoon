@@ -11,6 +11,7 @@ pub mod errors;
 pub mod models;
 
 mod request;
+mod request_non_standard;
 
 pub use chat_completions::{ChatCompletionRequest, ChatCompletionResponse};
 pub use completions::{CompletionRequest, CompletionResponse};
