@@ -103,9 +103,13 @@ wallet address. `rocoon` derives the Cocoon wallet smart-contract address from
 `client.owner_address` and `client.node_wallet_key`, then sends that derived
 contract address in `client.connectToProxy`.
 
+Set `network.proxy_addr = "auto"` or `COCOON_PROXY_ADDR=auto` to read the
+Cocoon root contract and connect to a random registered client proxy address.
+
 `[ton]` uses TON liteservers to fill `/stats.wallet.*`,
 `/stats.client_contract.*`, and the masterchain seqno used for the read. The
-same liteclient path sends signed external messages for explicit CLI controls.
+same liteclient path sends signed external messages for explicit CLI controls
+and resolves `network.proxy_addr = "auto"`.
 It is also used for long-auth registration and client-contract top-up. Omit
 `config_path` to use rocoon's embedded mainnet config, or the `ton-rs` default
 when `mainnet = false`.
@@ -167,9 +171,7 @@ It also returns TON wallet balance,
 seqno, account state, last transaction logical time, client-contract state,
 stake/balance/tokens fields, and masterchain seqno. If
 `[ton].root_contract_address` is set, it also reads the root contract version,
-`last_proxy_seqno`, and registered proxy addresses for diagnostics. The fetched
-proxy list does not change the active connection yet; `network.proxy_addr` is
-still used.
+`last_proxy_seqno`, and registered proxy addresses for diagnostics.
 
 When the proxy returns `auth: short`, `rocoon` uses `client.secret` or
 `COCOON_CLIENT_SECRET` to call `client.authorizeWithProxyShort`.

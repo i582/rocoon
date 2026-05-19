@@ -19,13 +19,13 @@ use sha2::{Digest, Sha256};
 
 use crate::ton_readonly::{
     COCOON_WALLET_MIN_BALANCE_NANOTONS, COCOON_WALLET_RESERVE_NANOTONS,
-    CONTROL_MESSAGE_VALUE_NANOTONS, ClientContractSnapshot, RootContractSnapshot, TonAccountState,
-    TonClientRegisterPreparedMessage, TonClientRegisterRequest, TonClientRegisterResult,
-    TonClientSecretHashPreparedMessage, TonClientSecretHashRequest, TonClientSecretHashResult,
-    TonClientTopUpPreparedMessage, TonClientTopUpRequest, TonClientTopUpResult, TonControlAction,
-    TonControlPreparedMessage, TonControlRequest, TonControlResult, TonReadonlyClient,
-    TonReadonlySnapshot, TonWalletSnapshot, TonWalletTransferPreparedMessage,
-    TonWalletTransferRequest, TonWalletTransferResult,
+    CONTROL_MESSAGE_VALUE_NANOTONS, ClientContractSnapshot, RegisteredProxySnapshot,
+    RootContractSnapshot, TonAccountState, TonClientRegisterPreparedMessage,
+    TonClientRegisterRequest, TonClientRegisterResult, TonClientSecretHashPreparedMessage,
+    TonClientSecretHashRequest, TonClientSecretHashResult, TonClientTopUpPreparedMessage,
+    TonClientTopUpRequest, TonClientTopUpResult, TonControlAction, TonControlPreparedMessage,
+    TonControlRequest, TonControlResult, TonReadonlyClient, TonReadonlySnapshot, TonWalletSnapshot,
+    TonWalletTransferPreparedMessage, TonWalletTransferRequest, TonWalletTransferResult,
 };
 use rocoon_config::{RuntimeConfig, TonRuntimeConfig, color::OwoColorize};
 use rocoon_protocol::{self as cocoon, RunQueryOptions, WorkerInstanceV2, WorkerTypeV2};
@@ -44,6 +44,7 @@ const INTERACTIVE_REQUIRED_WALLET_BALANCE_NANOTONS: u64 = 20_000_000_000;
 const NANOTONS_PER_TON: u64 = 1_000_000_000;
 const SECRET_HASH_CONFIRM_ATTEMPTS: usize = 30;
 const SECRET_HASH_CONFIRM_INTERVAL: Duration = Duration::from_secs(1);
+const AUTO_PROXY_ADDR: &str = "auto";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ConnectVerbosity {
@@ -267,13 +268,14 @@ impl CocoonClient {
     /// Returns non-actionable connection, transport, protocol, and TON errors.
     pub fn connect_interactive(config: &RuntimeConfig) -> Result<Self> {
         let verbosity = ConnectVerbosity::interactive(config.verbose);
+        let config = resolve_proxy_config(config, verbosity.is_interactive())?;
         loop {
             println!(
                 "{} Connecting to Cocoon proxy {}",
                 ">".cyan().bold(),
                 config.proxy_addr
             );
-            match Self::connect_with_verbosity(config, verbosity) {
+            match Self::connect_with_verbosity(&config, verbosity) {
                 Ok(client) => {
                     println!("{} Cocoon proxy connected", "✓".green().bold());
                     return Ok(client);
@@ -436,9 +438,10 @@ impl CocoonClient {
     }
 
     fn connect_with_verbosity(config: &RuntimeConfig, verbosity: ConnectVerbosity) -> Result<Self> {
-        let mut session = open_session(config, verbosity.is_verbose())?;
-        let mut ton_readonly = TonReadonlyState::new(config);
-        let authorization = authorize(&mut session, config, &mut ton_readonly, verbosity)?;
+        let config = resolve_proxy_config(config, verbosity.is_interactive())?;
+        let mut session = open_session(&config, verbosity.is_verbose())?;
+        let mut ton_readonly = TonReadonlyState::new(&config);
+        let authorization = authorize(&mut session, &config, &mut ton_readonly, verbosity)?;
 
         Ok(Self {
             session,
@@ -1332,8 +1335,76 @@ fn open_session(config: &RuntimeConfig, verbose: bool) -> Result<Session<ratls::
 }
 
 fn discover_proxy_info(config: &RuntimeConfig, verbose: bool) -> Result<ConnectedProxyInfo> {
-    let mut session = open_session(config, verbose)?;
-    connect_to_proxy(&mut session, config)
+    let config = resolve_proxy_config(config, verbose)?;
+    let mut session = open_session(&config, verbose)?;
+    connect_to_proxy(&mut session, &config)
+}
+
+fn resolve_proxy_config(config: &RuntimeConfig, announce: bool) -> Result<RuntimeConfig> {
+    if !is_auto_proxy_addr(&config.proxy_addr) {
+        return Ok(config.clone());
+    }
+
+    let root_contract_address = config.ton.root_contract_address.as_deref().context(
+        "network.proxy_addr = \"auto\" requires [ton].root_contract_address or ton.mainnet = true",
+    )?;
+    if announce {
+        println!(
+            "{} Resolving Cocoon proxy from root contract {}",
+            ">".cyan().bold(),
+            root_contract_address.cyan().bold()
+        );
+    }
+
+    let snapshot = CocoonClient::root_contract_snapshot(config, Some(root_contract_address))
+        .context("resolve network.proxy_addr = \"auto\"")?;
+    let proxy = select_auto_proxy(&snapshot.registered_proxies).with_context(|| {
+        format!("no registered proxies found in Cocoon root contract {root_contract_address}")
+    })?;
+    let proxy_seqno = proxy.seqno;
+    let proxy_addr = proxy.address_for_clients.clone();
+    if announce {
+        println!(
+            "{} Selected Cocoon proxy {} (seqno {})",
+            "✓".green().bold(),
+            proxy_addr.cyan().bold(),
+            proxy_seqno
+        );
+    }
+
+    let mut config = config.clone();
+    config.proxy_addr = proxy_addr;
+    Ok(config)
+}
+
+fn is_auto_proxy_addr(proxy_addr: &str) -> bool {
+    proxy_addr.trim().eq_ignore_ascii_case(AUTO_PROXY_ADDR)
+}
+
+fn select_auto_proxy(proxies: &[RegisteredProxySnapshot]) -> Option<&RegisteredProxySnapshot> {
+    let candidate_count = proxies
+        .iter()
+        .filter(|proxy| proxy_has_client_address(proxy))
+        .count();
+    if candidate_count == 0 {
+        return None;
+    }
+    let selected_index = rand::thread_rng().gen_range(0..candidate_count);
+    select_auto_proxy_at(proxies, selected_index)
+}
+
+fn select_auto_proxy_at(
+    proxies: &[RegisteredProxySnapshot],
+    selected_index: usize,
+) -> Option<&RegisteredProxySnapshot> {
+    proxies
+        .iter()
+        .filter(|proxy| proxy_has_client_address(proxy))
+        .nth(selected_index)
+}
+
+fn proxy_has_client_address(proxy: &RegisteredProxySnapshot) -> bool {
+    !proxy.address_for_clients.trim().is_empty()
 }
 
 fn resolve_client_contract_address(
@@ -1956,6 +2027,15 @@ mod tests {
         }
     }
 
+    fn registered_proxy(seqno: u32, address_for_clients: &str) -> RegisteredProxySnapshot {
+        RegisteredProxySnapshot {
+            seqno,
+            address: address_for_clients.to_string(),
+            address_for_workers: format!("workers-{seqno}:8888"),
+            address_for_clients: address_for_clients.to_string(),
+        }
+    }
+
     #[test]
     fn proxy_client_closing_query_error_is_actionable() {
         let error = anyhow::Error::new(QueryError::new(602, "client is closing"));
@@ -1969,6 +2049,42 @@ mod tests {
             anyhow::Error::new(ClientContractClosedOrClosing).context("client.connectToProxy");
 
         assert!(is_client_contract_closed_or_closing_error(&error));
+    }
+
+    #[test]
+    fn auto_proxy_selects_index_from_available_client_addresses() {
+        let proxies = [
+            registered_proxy(1, "proxy-1:8888"),
+            registered_proxy(2, "proxy-2:8888"),
+        ];
+
+        let proxy = select_auto_proxy_at(&proxies, 1).expect("proxy should be selected");
+
+        assert_eq!(proxy.address_for_clients, "proxy-2:8888");
+    }
+
+    #[test]
+    fn auto_proxy_random_selection_returns_a_candidate() {
+        let proxies = [
+            registered_proxy(3, "proxy-3:8888"),
+            registered_proxy(7, "proxy-7:8888"),
+        ];
+
+        let proxy = select_auto_proxy(&proxies).expect("proxy should be selected");
+
+        assert!(["proxy-3:8888", "proxy-7:8888"].contains(&proxy.address_for_clients.as_str()));
+    }
+
+    #[test]
+    fn auto_proxy_ignores_empty_client_addresses() {
+        let proxies = [
+            registered_proxy(10, ""),
+            registered_proxy(9, "proxy-9:8888"),
+        ];
+
+        let proxy = select_auto_proxy_at(&proxies, 0).expect("proxy should be selected");
+
+        assert_eq!(proxy.address_for_clients, "proxy-9:8888");
     }
 
     #[test]
