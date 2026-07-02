@@ -2392,7 +2392,7 @@ dependencies = [
 
 [[package]]
 name = "rocoon"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2407,7 +2407,7 @@ dependencies = [
 
 [[package]]
 name = "rocoon-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
@@ -2425,7 +2425,7 @@ dependencies = [
 
 [[package]]
 name = "rocoon-config"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -2442,14 +2442,14 @@ dependencies = [
 
 [[package]]
 name = "rocoon-contract"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ton",
 ]
 
 [[package]]
 name = "rocoon-openai"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-openai",
  "serde",
@@ -2458,7 +2458,7 @@ dependencies = [
 
 [[package]]
 name = "rocoon-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "tl-proto 0.5.4",
@@ -2466,7 +2466,7 @@ dependencies = [
 
 [[package]]
 name = "rocoon-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "rocoon-client",
@@ -2478,7 +2478,7 @@ dependencies = [
 
 [[package]]
 name = "rocoon-state"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "rocoon-config",
@@ -2486,7 +2486,7 @@ dependencies = [
 
 [[package]]
 name = "rocoon-transport"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "rand 0.8.6",
