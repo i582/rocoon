@@ -511,11 +511,12 @@ fn validate(config: &FileConfig) -> Result<()> {
         anyhow::bail!("network.connect_timeout_secs must be greater than zero");
     }
     validate_server(&config.server)?;
-    if config.client.owner_address.trim().is_empty() {
-        anyhow::bail!("client.owner_address must not be empty");
-    }
-    if config.client.node_wallet_key.trim().is_empty() {
-        anyhow::bail!("client.node_wallet_key must not be empty");
+    if config.client.owner_address.trim().is_empty()
+        || config.client.node_wallet_key.trim().is_empty()
+    {
+        anyhow::bail!(
+            "Cocoon authorization is required.\nRun `rocoon start` to complete setup, or use `--config <path>` with an existing configuration."
+        );
     }
     if config.request.max_coefficient < 0 {
         anyhow::bail!("request.max_coefficient must not be negative");
